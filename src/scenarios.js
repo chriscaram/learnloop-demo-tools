@@ -119,6 +119,7 @@ export function scenarioFingerprint(def, { seed, anchor }) {
 }
 
 const dayWord = (d) => `${-d} day${d === -1 ? '' : 's'} before the start date`;
+const span = (from, to) => `between ${-from} and ${-to} day${to === -1 ? '' : 's'} before the start date`;
 
 /** The parameters as plain sentences, generated from the numbers so the two cannot disagree. */
 export function plainParameters(def) {
@@ -126,7 +127,7 @@ export function plainParameters(def) {
   const lines = [];
   lines.push(`${p.population.regular + p.population.lapsing} of the 420 paying learners open lessons two to five days a week; ${p.population.rarelyActive} sign in rarely and do not open lessons.`);
   if (p.lapse) {
-    lines.push(`${p.population.lapsing} of the active learners open their last lesson between ${dayWord(p.lapse.lastLessonFromDay)} and ${dayWord(p.lapse.lastLessonToDay)}. Afterwards they keep signing in every few days but never open a lesson again.`);
+    lines.push(`${p.population.lapsing} of the active learners open their last lesson ${span(p.lapse.lastLessonFromDay, p.lapse.lastLessonToDay)}, spread evenly. Afterwards they keep signing in every few days but never open a lesson again.`);
   } else {
     lines.push('No group of learners changes its habits on its own.');
   }
@@ -137,7 +138,7 @@ export function plainParameters(def) {
   }
   if (p.outage) {
     const o = p.outage;
-    lines.push(`From ${dayWord(o.fromDay)} to ${dayWord(o.toDay)}, ${Math.round(o.failureShare * 100)}% of attempts to open a lesson fail with a server error; learners retry ${o.retriesMin} to ${o.retriesMax} times, then leave.`);
+    lines.push(`${span(o.fromDay, o.toDay).replace(/^b/, 'B')}, ${Math.round(o.failureShare * 100)}% of attempts to open a lesson fail with a server error; learners retry ${o.retriesMin} to ${o.retriesMax} times, then leave.`);
     lines.push(`${Math.round(o.giveUpShare * 100)}% of the active learners who ran into the errors never open a lesson again after the outage, though they keep signing in.`);
   } else {
     lines.push('There is no outage: server errors stay below 0.3% on every route, every day.');
@@ -146,10 +147,10 @@ export function plainParameters(def) {
   const periods = p.cancellations.map((c) => {
     const n = c.rarelyActive + c.stoppedLearning;
     const weeks = (c.toDay - c.fromDay + 1) / 7;
-    return `${n} between ${dayWord(c.fromDay)} and ${dayWord(c.toDay)} (about ${(n / weeks).toFixed(1)} a week${c.stoppedLearning ? `, ${c.stoppedLearning} of them by learners who had stopped opening lessons` : ''})`;
+    return `${n} ${span(c.fromDay, c.toDay)} (about ${(n / weeks).toFixed(1)} a week${c.stoppedLearning ? `, ${c.stoppedLearning} of them by learners who had stopped opening lessons` : ''})`;
   });
   lines.push(`${total} subscriptions are cancelled: ${periods.join('; ')}.`);
-  lines.push('Releases go out every 10 to 14 working days. About 1% of requests come from a search-engine crawler, on public pages only.');
+  lines.push('A release goes out every 10 to 14 days, on a weekday. About 1% of requests come from a search-engine crawler, on public pages only.');
   return lines;
 }
 

@@ -227,7 +227,8 @@ function dailySeries(sim, api, dayOf, learnerIds) {
     return {
       ...rest,
       learnersOnLessons: learners.size,
-      learnersOnLessons7d: week.size,
+      // a full week is needed for a weekly count; the first six days have none
+      learnersOnLessons7d: i >= 6 ? week.size : null,
       lessonP95Ms: percentile(lessonLatencies, 95),
       lessonErrorPct: row.lessonRequests ? Math.round((row.lessonErrors / row.lessonRequests) * 1000) / 10 : 0,
     };

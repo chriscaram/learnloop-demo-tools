@@ -2,7 +2,7 @@
   "id": "lapsed-learners",
   "title": "Learners quietly stop opening lessons",
   "description": "About six weeks before the start date, over two weeks, about a third of the paying learners stop opening lessons. They keep signing in every few days and look at their dashboard and the catalog, but never start a lesson again. Soon after, cancellations start to climb.",
-  "expected_finding": "About 40% fewer people are using the lessons part of 'Course delivery and learner progress'. The agent reports it as fewer returning users, says the application was healthy over the period, and proposes an AI agent that brings inactive learners back.",
+  "expected_finding": "About 40% fewer people are using the lessons part of 'Course delivery and learner progress'. The agent reports it as fewer returning users and says the application was healthy over the period. In the live demo it has gone on to propose an AI agent that brings inactive learners back.",
   "status": "verified",
   "verified_against": [
     {

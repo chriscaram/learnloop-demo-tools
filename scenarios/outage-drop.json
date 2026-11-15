@@ -1,21 +1,21 @@
 {
   "id": "outage-drop",
   "title": "An outage drives learners away",
-  "description": "About a month before the start date, the lessons stop working for nine days: opening a lesson fails with an error, learners reload a few times and give up. When lessons work again, about half of the learners who ran into the errors never open a lesson again, although they still sign in. Some of them cancel in the following weeks.",
+  "description": "About a month before the start date, the lessons stop working for nine days: opening a lesson fails with an error, learners reload a few times and give up. When lessons work again, more than half of the learners who ran into the errors never open a lesson again, although they still sign in. Some of them cancel in the following weeks.",
   "expected_finding": "Lesson use fell by about a third, and the agent says why: the application was failing during those nine days. It reports a falling trend caused by an outage (a reliability problem), and it withdraws the 'fewer returning learners' finding instead of presenting the fall as learners losing interest.",
   "status": "verified",
   "verified_against": [
     {
       "file": "packages/modules/new-evolution-opportunity/drift/explanations.js (incidentFromUsage) and constants.js (INCIDENT_ERROR_RATE_PCT)",
-      "threshold": "the outage covers days -32..-24, so it falls in BOTH 30-day windows the agent reads (days -59..-30 and -29..0). The server-error share over the learning routes is about 8-9% in the earlier window and about 26% in the recent one (about 7% and 20% even if the catalog routes were in the same capability), above INCIDENT_ERROR_RATE_PCT = 5, so incident_or_outage is 'confirmed' whichever window the agent read last"
+      "threshold": "the outage covers days -32..-24, so it falls in BOTH 30-day windows the agent reads (days -59..-30 and -29..0). The server-error share over the learning routes is about 7-9% in the earlier window and about 28% in the recent one (about 5.6-7.5% and 21% even if the catalog routes were in the same capability), above INCIDENT_ERROR_RATE_PCT = 5, so incident_or_outage is 'confirmed' whichever window the agent read last (checked for start dates on all seven weekdays)"
     },
     {
       "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (detectActorInactivity, SUPPRESSING_CAUSES, finalizeCandidate)",
-      "threshold": "distinct users on /api/lessons/{lessonId}/progress fall about 37-42% between the two windows (quiz route about 51%), above ACTOR_INACTIVITY_DROP_PCT = 33 with about 340 people in the earlier window (MIN_INACTIVITY_ACTORS = 200): an NBF-USAGE-ACTOR_INACTIVITY candidate is built and then withdrawn by SUPPRESSING_CAUSES (incident_or_outage), listed in the detection report as 'explained_by_confirmed_alternative'"
+      "threshold": "distinct users on /api/lessons/{lessonId}/progress fall about 43-48% between the two windows (quiz route about 55%), above ACTOR_INACTIVITY_DROP_PCT = 33 with about 340 people in the earlier window (MIN_INACTIVITY_ACTORS = 200): an NBF-USAGE-ACTOR_INACTIVITY candidate is built and then withdrawn by SUPPRESSING_CAUSES (incident_or_outage), listed in the detection report as 'explained_by_confirmed_alternative'"
     },
     {
       "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (detectGoalTrend) and decompose.js (trendOf)",
-      "threshold": "daily requests on the learning routes fall about 30% between the two halves of the history, beyond TREND_NEGATIVE_PCT = 10, so NBF-DRIFT-GOAL_TREND_NEGATIVE is raised on the goal the lessons serve with the confirmed outage as its cause (DETERMINISTIC_CAUSE_KINDS: no model is asked)"
+      "threshold": "daily requests on the learning routes fall about 34-39% between the two halves of the history, beyond TREND_NEGATIVE_PCT = 10, so NBF-DRIFT-GOAL_TREND_NEGATIVE is raised on the goal the lessons serve with the confirmed outage as its cause (DETERMINISTIC_CAUSE_KINDS: no model is asked)"
     }
   ],
   "parameters": {
@@ -52,7 +52,7 @@
       "failureShare": 0.92,
       "retriesMin": 2,
       "retriesMax": 5,
-      "giveUpShare": 0.5
+      "giveUpShare": 0.56
     }
   }
 }

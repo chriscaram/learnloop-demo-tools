@@ -38,6 +38,17 @@ test('same arguments produce byte-identical output', () => {
   assert.equal(digest(generate(ARGS)), digest(result));
 });
 
+// The digest of the generator's output for these arguments BEFORE scenarios existed
+// (commit ee4ba06). lapsed-learners must keep reproducing it byte for byte: the
+// scenario refactor moved the numbers into scenarios/lapsed-learners.json, it must not
+// have moved a single byte of output. If this fails, the default scenario changed.
+const PRE_SCENARIO_DIGEST = '6ad44fd7990267fbc666e343893a1df0c4b0230cb556dffcc99f9bc86abd24f4';
+
+test('lapsed-learners is byte-identical to the generator before scenarios (committed fingerprint)', () => {
+  assert.equal(result.stats.scenario, 'lapsed-learners');
+  assert.equal(digest(result), PRE_SCENARIO_DIGEST);
+});
+
 test('history: distinct learners on the learning routes, 30-day windows (±5%)', () => {
   const { window1, window2 } = result.stats;
   assert.ok(within(window1.learnersOnLessons, 340), `window1 ${window1.learnersOnLessons}`);

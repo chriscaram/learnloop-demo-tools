@@ -6,6 +6,7 @@ import {
   BROWSER_USER_AGENTS, COURSES, EDGE_LOCATIONS, FIRST_NAMES, HOURLY_WEIGHTS, LAST_NAMES, WEEKDAY_FACTORS,
 } from './content.js';
 import { createRng } from './rng.js';
+import { getScenario } from './scenarios.js';
 
 export const DAY_MS = 86_400_000;
 export const HISTORY_DAYS = 60;
@@ -21,6 +22,7 @@ const OTHER_STAFF = [
   { email: 'priya.nair@example.com', name: 'Priya Nair' },
 ];
 
+// The lapsed-learners split; a scenario chooses its own (scenarios/*.json `population`).
 export const POPULATION = Object.freeze({ learners: 420, cohortA: 195, cohortB: 145, cohortC: 80 });
 export const OFFICE_IP = '203.0.113.10';
 export const CRAWLER_IPS = ['198.51.100.201', '198.51.100.202', '198.51.100.203', '198.51.100.204'];
@@ -53,7 +55,16 @@ const STAFF_MESSAGES = [
 
 const iso = (ms) => new Date(ms).toISOString();
 
-export function simulate({ anchor, seed }) {
+/**
+ * `scenario` is a validated definition (src/scenarios.js) or a scenario id; the default
+ * is lapsed-learners, whose output is byte-identical to the generator before scenarios
+ * existed. Every parameter below that a scenario leaves null draws no random number,
+ * so one scenario's choices never shift another's streams.
+ */
+export function simulate({ anchor, seed, scenario = undefined }) {
+  const def = typeof scenario === 'object' && scenario ? scenario : getScenario(scenario);
+  const P = def.parameters;
+  const pop = { learners: 420, cohortA: P.population.regular, cohortB: P.population.lapsing, cohortC: P.population.rarelyActive };
   const anchorMs = Date.parse(`${anchor}T00:00:00.000Z`);
   if (Number.isNaN(anchorMs)) throw new Error(`invalid anchor date: ${anchor}`);
   const dayStart = (day) => anchorMs + day * DAY_MS;
@@ -124,7 +135,7 @@ export function simulate({ anchor, seed }) {
   learners.push(makeLearner({ ...PERSONAS.ana, persona: 'ana' }));
   learners.push(makeLearner({ ...PERSONAS.marco, persona: 'marco' }));
   for (const [first, last] of namePairs) {
-    if (learners.length >= POPULATION.learners) break;
+    if (learners.length >= pop.learners) break;
     let email = `${first}.${last}@example.com`.toLowerCase();
     for (let n = 2; emails.has(email); n += 1) email = `${first}.${last}${n}@example.com`.toLowerCase();
     emails.add(email);
@@ -133,9 +144,9 @@ export function simulate({ anchor, seed }) {
 
   // cohorts A, B and C
   const others = popRng.shuffle(learners.slice(2));
-  const cohortA = [learners[1], ...others.slice(0, POPULATION.cohortA - 1)];
-  const cohortB = [learners[0], ...others.slice(POPULATION.cohortA - 1, POPULATION.cohortA + POPULATION.cohortB - 2)];
-  const cohortC = others.slice(POPULATION.cohortA + POPULATION.cohortB - 2);
+  const cohortA = [learners[1], ...others.slice(0, pop.cohortA - 1)];
+  const cohortB = [learners[0], ...others.slice(pop.cohortA - 1, pop.cohortA + pop.cohortB - 2)];
+  const cohortC = others.slice(pop.cohortA + pop.cohortB - 2);
   for (const u of cohortA) u.group = 'cohortA';
   for (const u of cohortB) u.group = 'cohortB';
   for (const u of cohortC) u.group = 'cohortC';
@@ -165,9 +176,30 @@ export function simulate({ anchor, seed }) {
     u.laterVisitsPerDay = behRng.float(0.26, 0.46);
     u.subStartMs = dayStart(-behRng.int(61, 200)) + behRng.int(8 * 60, 22 * 60) * MIN_MS + behRng.int(0, 59_999);
   }
-  const lastLessonOrder = behRng.shuffle(cohortB.slice(1));
-  lastLessonOrder.forEach((u, i) => { u.lastLessonDay = -45 + Math.floor((i * 15) / lastLessonOrder.length); });
-  learners[0].lastLessonDay = -33;
+  // lapse: cohort B's last lesson days, spread evenly over the scenario's span
+  if (P.lapse) {
+    const span = P.lapse.lastLessonToDay - P.lapse.lastLessonFromDay + 1;
+    const lastLessonOrder = behRng.shuffle(cohortB.slice(1));
+    lastLessonOrder.forEach((u, i) => {
+      u.lastLessonDay = P.lapse.lastLessonFromDay + Math.floor((i * span) / lastLessonOrder.length);
+      u.stopDay = u.lastLessonDay;
+    });
+  }
+  learners[0].lastLessonDay = -33; // Ana's script, in every scenario
+
+  // outage: who gives up on lessons after it (decided up front, from its own stream)
+  const outage = P.outage;
+  const inOutage = (day) => !!outage && day >= outage.fromDay && day <= outage.toDay;
+  const lost = [];
+  if (outage) {
+    const outRng = createRng(seed, 'outage');
+    const candidates = outRng.shuffle([...cohortA.slice(1), ...cohortB.slice(1)]);
+    lost.push(...candidates.slice(0, Math.round(candidates.length * outage.giveUpShare)));
+    for (const u of lost) {
+      u.lostAfterOutage = true;
+      u.stopDay = outage.toDay;
+    }
+  }
 
   // cancellation schedule: [first day, last day, how many from cohort C, how many from cohort B]
   const cxRng = createRng(seed, 'cancellations');
@@ -176,14 +208,15 @@ export function simulate({ anchor, seed }) {
     for (let d = from; d <= to; d += 1) days.push([d, WEEKDAY_FACTORS[new Date(dayStart(d)).getUTCDay()]]);
     return cxRng.weighted(days)[0];
   };
+  // learners who stopped opening lessons (lapsed, or gave up after the outage) cancel
+  // at least five days after they stopped
   const poolC = cxRng.shuffle(cohortC);
-  const poolB = cxRng.shuffle(cohortB.slice(1));
-  const plan = [[-60, -31, 17, 0], [-30, -15, 7, 8], [-14, -1, 4, 18]];
-  for (const [from, to, fromC, fromB] of plan) {
+  const poolB = cxRng.shuffle(P.lapse ? cohortB.slice(1) : lost);
+  for (const { fromDay: from, toDay: to, rarelyActive: fromC, stoppedLearning: fromB } of P.cancellations) {
     for (let i = 0; i < fromC; i += 1) poolC.pop().cancelDay = pickDay(from, to);
     for (let i = 0; i < fromB; i += 1) {
       const day = pickDay(from, to);
-      const index = poolB.findIndex((u) => u.lastLessonDay <= day - 5);
+      const index = poolB.findIndex((u) => u.stopDay <= day - 5);
       if (index >= 0) poolB.splice(index, 1)[0].cancelDay = day;
     }
   }
@@ -342,6 +375,9 @@ export function simulate({ anchor, seed }) {
     for (const v of versions) if (v.fromMs <= ms) current = v;
     return current;
   };
+  // slowdown: starts with the first release on or after the scenario's day
+  const slowRelease = P.slowdown ? versions.find((v) => v.fromMs >= dayStart(P.slowdown.fromReleaseOnOrAfterDay)) ?? null : null;
+  if (P.slowdown && !slowRelease) throw new Error(`scenario ${def.id}: no release on or after day ${P.slowdown.fromReleaseOnOrAfterDay}`);
 
   // ---------------------------------------------------------------- the 60 days
   const simRng = createRng(seed, 'sessions');
@@ -368,9 +404,12 @@ export function simulate({ anchor, seed }) {
   let flagDay = -51;
   while ([0, 6].includes(new Date(dayStart(flagDay)).getUTCDay())) flagDay += 1;
 
-  const routeLatency = (day, route) => {
+  const routeLatency = (day, route, ts) => {
     const key = `${day}:${SLOW_ROUTES.has(route) ? 'slow' : 'fast'}`;
     if (!latencyNoise.has(key)) latencyNoise.set(key, 1 + Math.max(-0.06, Math.min(0.06, 0.025 * netRng.normal())));
+    if (slowRelease && SLOW_ROUTES.has(route) && ts >= slowRelease.fromMs) {
+      return Math.max(4, Math.round(netRng.lognormal(P.slowdown.lessonMedianMs * latencyNoise.get(key), P.slowdown.spread)));
+    }
     const median = (SLOW_ROUTES.has(route) ? 72 : 36) * latencyNoise.get(key);
     return Math.max(4, Math.round(netRng.lognormal(median, 0.3)));
   };
@@ -425,6 +464,10 @@ export function simulate({ anchor, seed }) {
         continue;
       }
       if (u.group === 'cohortB' && day > u.lastLessonDay) {
+        if (simRng.chance(u.laterVisitsPerDay * factor)) plans.push({ user: u, type: 'browse' });
+        continue;
+      }
+      if (u.lostAfterOutage && day > outage.toDay) {
         if (simRng.chance(u.laterVisitsPerDay * factor)) plans.push({ user: u, type: 'browse' });
         continue;
       }
@@ -511,7 +554,7 @@ export function simulate({ anchor, seed }) {
     const base = { ua: u.ua, ip: u.ip, edge: u.edge };
 
     const api = (service, method, route, path, { status = 200, events = [] } = {}) => {
-      const latencyMs = routeLatency(day, route);
+      const latencyMs = routeLatency(day, route, now);
       const req = {
         kind: 'api', ts: now, service, method, route, path, status, latencyMs, ...base,
         userId: session.id ? u.id : null, sessionId: session.id, referer: session.page,
@@ -589,7 +632,9 @@ export function simulate({ anchor, seed }) {
         think(3, 15);
         if (plan.catalog) browseCatalog(u, api, think, session, rng);
         const visits = plan.script ? 1 : rng.chance(0.3) ? 2 : 1;
-        for (let i = 0; i < visits; i += 1) lessonVisit(plan, u, api, think, session, rng);
+        for (let i = 0; i < visits; i += 1) {
+          if (!lessonVisit(plan, u, api, think, session, rng, day)) break;
+        }
       } else {
         think(5, 30);
         if (plan.catalog) browseCatalog(u, api, think, session, rng);
@@ -653,7 +698,8 @@ export function simulate({ anchor, seed }) {
     }
   }
 
-  function lessonVisit(plan, u, api, think, session, rng) {
+  // Returns false when the visit failed (outage) and the learner gives up for today.
+  function lessonVisit(plan, u, api, think, session, rng, day) {
     let lesson;
     let completes;
     if (plan.script) {
@@ -686,6 +732,19 @@ export function simulate({ anchor, seed }) {
     }
     think(1, 4);
     session.page = `/lessons/${lesson.id}`;
+    if (inOutage(day) && rng.chance(outage.failureShare)) {
+      // the lesson page fails; the learner reloads a few times, then gives up
+      const fail = (route, path) => { api('learning', 'GET', route, path, { status: 500 }).logError = 'InternalError'; };
+      fail('/api/lessons/{lessonId}', `/api/lessons/${lesson.id}`);
+      fail('/api/courses/{courseId}/lessons', `/api/courses/${lesson.course_id}/lessons`);
+      const retries = rng.int(outage.retriesMin, outage.retriesMax);
+      for (let i = 0; i < retries; i += 1) {
+        think(3, 20);
+        fail('/api/lessons/{lessonId}', `/api/lessons/${lesson.id}`);
+      }
+      think(5, 30);
+      return false;
+    }
     api('learning', 'GET', '/api/lessons/{lessonId}', `/api/lessons/${lesson.id}`);
     api('learning', 'GET', '/api/courses/{courseId}/lessons', `/api/courses/${lesson.course_id}/lessons`);
     if (u.lessonState.get(lesson.id)?.status !== 'completed') {
@@ -697,7 +756,7 @@ export function simulate({ anchor, seed }) {
       completes = false;
     }
     think(120, 300);
-    if (!completes) return;
+    if (!completes) return true;
     const req = api('learning', 'POST', '/api/lessons/{lessonId}/progress', `/api/lessons/${lesson.id}/progress`, {
       events: [{ event: 'lesson_completed', entityType: 'lesson', entityId: lesson.id, actorType: 'learner', value: lesson.duration_min }],
     });
@@ -710,6 +769,7 @@ export function simulate({ anchor, seed }) {
       });
       quizResults.push({ id: newId('qzr'), user_id: u.id, lesson_id: lesson.id, score, correct: Math.round((score / 100) * 3), total: 3, submitted_at: iso(quizReq.events[0].ts) });
     }
+    return true;
   }
 
   // ---------------------------------------------------------------- end state
@@ -735,8 +795,12 @@ export function simulate({ anchor, seed }) {
   requests.sort((a, b) => a.ts - b.ts);
   systemEvents.sort((a, b) => a.ts - b.ts);
   return {
-    anchorMs, data, requests, systemEvents, versions, learners, staff,
-    groups: { cohortA: cohortA.map((u) => u.id), cohortB: cohortB.map((u) => u.id), cohortC: cohortC.map((u) => u.id) },
+    anchorMs, data, requests, systemEvents, versions, learners, staff, scenario: def,
+    slowRelease: slowRelease ? { version: slowRelease.version, from: iso(slowRelease.fromMs) } : null,
+    groups: {
+      cohortA: cohortA.map((u) => u.id), cohortB: cohortB.map((u) => u.id), cohortC: cohortC.map((u) => u.id),
+      lostAfterOutage: lost.map((u) => u.id),
+    },
   };
 }
 

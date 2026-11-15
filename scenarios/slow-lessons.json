@@ -1,0 +1,45 @@
+{
+  "id": "slow-lessons",
+  "title": "A release makes lessons slow",
+  "description": "Five to seven weeks before the start date, a routine release goes out. From that moment every lesson takes about one and a half to two and a half seconds to open instead of a tenth of a second. Learners put up with it and keep learning at the same pace; nothing else changes.",
+  "expected_finding": "The lesson pages are slower than their target: most requests take about two seconds against a target of one second. The agent reports it as a speed problem in the code that serves lessons and finds no change in how learners use the product.",
+  "status": "verified",
+  "verified_against": [
+    {
+      "file": "packages/modules/code-optimization/performance.js (assessRoute, runPerformanceLens) and constants.js (DEFAULT_ROUTE_LATENCY_BUDGET, MIN_LATENCY_SAMPLES)",
+      "threshold": "the slow release lands between days -50 and -37 (the first release on or after day -50; release days depend on the start date's weekday), so lesson-route p95 is about 2.0 s in days -59..-30 and about 2.3 s in days -29..0 (p99 about 2.7 s and 2.9 s), above the default budget p95 1000 ms / p99 2500 ms, with about 20,000 latency samples per window (MIN_LATENCY_SAMPLES = 100) and complete 30-day baselines (MIN_BASELINE_COMPLETENESS_PCT = 60, MIN_BASELINE_OBSERVATIONS = 30). Over budget in both windows, so COP-PERF-LATENCY_BUDGET (severity medium, overrun about 2x) is raised whichever window the agent read last; COP-PERF-REGRESSION is not expected, because the earlier window is already slow"
+    },
+    {
+      "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (actorDropVerdict) and explanations.js (incidentFromUsage)",
+      "threshold": "distinct users on every lesson route change by less than 5% (ACTOR_INACTIVITY_DROP_PCT = 33), daily learning requests move about -3% (TREND_FLAT_PCT = 10) and server errors stay at 0% (INCIDENT_ERROR_RATE_PCT = 5): no usage or drift finding. The drift engine has no reference latency (reference_latency_p95_ms is null), so slowness alone is not read as an outage"
+    }
+  ],
+  "parameters": {
+    "population": {
+      "regular": 195,
+      "lapsing": 145,
+      "rarelyActive": 80
+    },
+    "lapse": null,
+    "cancellations": [
+      {
+        "fromDay": -60,
+        "toDay": -31,
+        "rarelyActive": 17,
+        "stoppedLearning": 0
+      },
+      {
+        "fromDay": -30,
+        "toDay": -1,
+        "rarelyActive": 17,
+        "stoppedLearning": 0
+      }
+    ],
+    "slowdown": {
+      "fromReleaseOnOrAfterDay": -50,
+      "lessonMedianMs": 1300,
+      "spread": 0.35
+    },
+    "outage": null
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "id": "lapsed-learners",
+  "title": "Learners quietly stop opening lessons",
+  "description": "About six weeks before the start date, over two weeks, about a third of the paying learners stop opening lessons. They keep signing in every few days and look at their dashboard and the catalog, but never start a lesson again. Soon after, cancellations start to climb.",
+  "expected_finding": "About 40% fewer people are using the lessons part of 'Course delivery and learner progress'. The agent reports it as fewer returning users, says the application was healthy over the period, and proposes an AI agent that brings inactive learners back.",
+  "status": "verified",
+  "verified_against": [
+    {
+      "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (detectActorInactivity, actorDropVerdict)",
+      "threshold": "distinct users on the lesson routes fall from 340 (days -59..-30) to 195 (days -29..0): a drop of about 43%, above ACTOR_INACTIVITY_DROP_PCT = 33, with at least MIN_INACTIVITY_ACTORS = 200 people in the earlier window. The capability's busiest route (/api/me/progress, read on every sign-in) moves only about 5%, so the agent reports the lesson routes ('part of' the capability)"
+    },
+    {
+      "file": "packages/modules/new-evolution-opportunity/drift/explanations.js (evaluateIncident)",
+      "threshold": "server errors stay below 0.3% per route per day, under INCIDENT_ERROR_RATE_PCT = 5, so an outage is ruled out rather than confirmed and the finding is not withdrawn"
+    },
+    {
+      "file": "live Governance Agent, application app_f41fb3ab2e5e",
+      "threshold": "raised NBF-USAGE-ACTOR_INACTIVITY on 2026-11-13 and 2026-11-15 from this exact scenario"
+    }
+  ],
+  "parameters": {
+    "population": {
+      "regular": 195,
+      "lapsing": 145,
+      "rarelyActive": 80
+    },
+    "lapse": {
+      "lastLessonFromDay": -45,
+      "lastLessonToDay": -31
+    },
+    "cancellations": [
+      {
+        "fromDay": -60,
+        "toDay": -31,
+        "rarelyActive": 17,
+        "stoppedLearning": 0
+      },
+      {
+        "fromDay": -30,
+        "toDay": -15,
+        "rarelyActive": 7,
+        "stoppedLearning": 8
+      },
+      {
+        "fromDay": -14,
+        "toDay": -1,
+        "rarelyActive": 4,
+        "stoppedLearning": 18
+      }
+    ],
+    "slowdown": null,
+    "outage": null
+  }
+}

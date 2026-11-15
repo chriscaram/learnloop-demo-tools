@@ -1,0 +1,31 @@
+{
+  "id": "steady-state",
+  "title": "Business as usual",
+  "description": "Nothing changes. For sixty days the same learners open lessons at the same pace, the application stays fast and healthy, and a few subscriptions are cancelled each week, as in any month.",
+  "expected_finding": "No finding about how learners use the product and no slow or failing part of the application. The agent should not invent a problem where there is none. Findings about the code itself (outdated packages, security) do not depend on this activity and may still appear.",
+  "status": "verified",
+  "verified_against": [
+    {
+      "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (actorDropVerdict)",
+      "threshold": "distinct users on the lesson routes change by less than 5% between the two 30-day windows, far below ACTOR_INACTIVITY_DROP_PCT = 33 (stand-down reason drop_below_threshold)"
+    },
+    {
+      "file": "packages/modules/new-evolution-opportunity/drift/decompose.js (trendOf)",
+      "threshold": "daily requests on the learning routes move less than TREND_FLAT_PCT = 10% between the two halves, so the trend is 'flat' and no NBF-DRIFT-GOAL_TREND_NEGATIVE is raised"
+    },
+    {
+      "file": "packages/modules/code-optimization/performance.js (assessRoute) and constants.js (DEFAULT_ROUTE_LATENCY_BUDGET)",
+      "threshold": "p95 about 120 ms on lesson routes and 60 ms elsewhere, far under the default budget p95 1000 ms / p99 2500 ms"
+    }
+  ],
+  "parameters": {
+    "population": { "regular": 195, "lapsing": 145, "rarelyActive": 80 },
+    "lapse": null,
+    "cancellations": [
+      { "fromDay": -60, "toDay": -31, "rarelyActive": 17, "stoppedLearning": 0 },
+      { "fromDay": -30, "toDay": -1, "rarelyActive": 17, "stoppedLearning": 0 }
+    ],
+    "slowdown": null,
+    "outage": null
+  }
+}

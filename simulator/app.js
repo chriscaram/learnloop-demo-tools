@@ -194,6 +194,20 @@ function renderStageControls() {
   button.dataset.stage = String(stage);
   button.textContent = plan.next ? `Load stage ${plan.next} — adds case ${plan.next}` : `All ${plan.count} stages are loaded`;
   button.toggleAttribute('data-all-loaded', !plan.next);
+  // After a load the page shows "Where it lands"; the next stage's button lives in moment 1,
+  // so this moment says what is next and takes the presenter back there.
+  const landNext = $('#land-next');
+  landNext.hidden = !plan.loaded;
+  if (plan.loaded) {
+    const gaStep = plan.loaded === 1
+      ? 'onboard LearnLoop as a new application (connecting usage telemetry reads the data), upload the business review and confirm its three goals'
+      : 'Settings → Connections → Usage telemetry → Get usage telemetry';
+    $('#land-next-text').textContent = plan.next
+      ? `Stage ${plan.loaded} of ${plan.count} is loaded. In the Governance Agent: ${gaStep}. When its finding appears, come back here for stage ${plan.next}.`
+      : `All ${plan.count} stages are loaded. In the Governance Agent: Settings → Connections → Usage telemetry → Get usage telemetry. At the end of the demo, open the envelope.`;
+    $('#land-next-button').textContent = plan.next ? `Go to stage ${plan.next} — adds case ${plan.next}` : 'Open the envelope';
+    $('#land-next-button').onclick = () => showMoment(plan.next ? 'seal' : 'reveal');
+  }
   if (!ui.running) button.disabled = !plan.next;
   $('#load-hint').textContent = plan.next
     ? `Clears the old log files, generates stage ${plan.next} of ${plan.count} (case${plan.next > 1 ? `s 1 to ${plan.next}` : ' 1'}), uploads it and reads it back${plan.next === plan.count ? ', then publishes the starting state' : ''}. One confirmation.`

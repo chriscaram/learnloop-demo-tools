@@ -267,5 +267,5 @@ function plainSupport(s) {
 
 /** The card shown before the reveal: the title and the audience description only (no expected finding, no parameters). */
 export function publicCard(def) {
-  return { id: def.id, title: def.title, description: def.description };
+  return { id: def.id, title: def.title, description: def.description, ...(def.cases ? { cases: def.cases } : {}) };
 }

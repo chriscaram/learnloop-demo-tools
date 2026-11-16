@@ -2,6 +2,26 @@
   "id": "q4-three-signals",
   "title": "A quarter where three things slip at once",
   "description": "Over the same few weeks, about six weeks before the start date, three things change. A third of the paying learners stop opening lessons but keep signing in. Learners keep putting their next course in the cart, yet far fewer complete the checkout. And the three-person team answers learner questions more and more slowly, until half of the learners stop coming back to the Help page. The application stays fast and healthy throughout.",
+  "cases": [
+    {
+      "title": "Learners stop continuing their course",
+      "what_changes": "About a third of the paying learners stop opening lessons, but they keep signing in and looking at their progress.",
+      "who": "Learners · for example Ana Moreno",
+      "ai_agent": "A lesson reminder: tells each inactive learner where they left off and links the next lesson."
+    },
+    {
+      "title": "Courses left in the cart",
+      "what_changes": "Learners keep putting their next course in the cart, yet far fewer complete the checkout. About 145 learners end with courses waiting in their cart.",
+      "who": "Learners · for example Marco Bellini",
+      "ai_agent": "A cart reminder: reminds each learner of the course waiting in their cart and links back to it."
+    },
+    {
+      "title": "The team stops answering questions in time",
+      "what_changes": "Questions pile up on a few repetitive topics (certificates, invoices, accounts) and replies slow from hours to weeks, so learners stop coming back to Help.",
+      "who": "Staff and learners · for example Sofia Lindqvist (staff) and Lena Hoffmann",
+      "ai_agent": "Draft replies for the staff: prepares an answer to each repetitive open question for the team to check and send."
+    }
+  ],
   "expected_finding": "Three separate findings, each about fewer returning users on part of a different capability, each saying the application was healthy over the period. About 40% fewer learners open lessons in 'Course delivery and learner progress' (an AI agent could bring inactive learners back with a lesson reminder). About half as many learners complete the enrolment step of the checkout in the catalog and purchase capability, while nearly as many as before put courses in their cart (an AI agent could remind the roughly 145 learners whose courses wait in their cart). And about half as many learners come back to the Help page, in the capability that holds the learner notifications and Help (an AI agent could draft answers to the repetitive open questions for the staff to check and send).",
   "status": "verified",
   "verified_against": [

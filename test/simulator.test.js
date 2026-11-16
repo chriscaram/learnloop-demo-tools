@@ -112,7 +112,8 @@ test('the page and the scenario cards are served; a card carries no parameters',
 test('a scenario card shows no expected finding; every scenario has a business review to download under a neutral name', async () => {
   const { scenarios } = await (await fetch(`${base}/api/scenarios`)).json();
   for (const s of scenarios) {
-    assert.deepEqual(Object.keys(s).sort(), ['description', 'id', 'title'], s.id);
+    assert.deepEqual(Object.keys(s).filter((k) => k !== 'cases').sort(), ['description', 'id', 'title'], s.id);
+    if (s.cases) assert.ok(s.cases.every((c) => c.title && c.what_changes && c.ai_agent), s.id);
     const res = await fetch(`${base}/api/scenarios/${s.id}/business-review`);
     assert.equal(res.status, 200, s.id);
     assert.match(res.headers.get('content-type'), /^text\/markdown/);

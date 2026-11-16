@@ -59,15 +59,36 @@ function logLine(text, kind = '') {
 }
 
 // ------------------------------------------------------------------ 1. scenario cards and the seal
+// A combined scenario leads, full width, with the cases it prepares drawn inside it as
+// numbered boxes (what changes, for whom, the AI agent it could lead to). One "Load this
+// scenario" loads them all. The single-signal scenarios follow as smaller cards.
+function caseBoxes(cases) {
+  const grid = el('div', { class: 'case-grid' });
+  cases.forEach((c, i) => grid.append(el('div', { class: 'case' },
+    el('span', { class: 'case-num', text: String(i + 1) }),
+    el('h4', { text: c.title }),
+    el('p', { text: c.what_changes }),
+    el('p', { class: 'case-who', text: c.who }),
+    el('p', { class: 'case-agent' }, el('strong', { text: 'AI agent it could lead to: ' }), c.ai_agent))));
+  return grid;
+}
+
 function renderCards() {
   const host = $('#cards');
   host.replaceChildren();
-  for (const s of ui.scenarios) {
-    const card = el('button', { type: 'button', class: 'card', role: 'radio', 'aria-checked': String(s.id === ui.selected) },
-      el('h3', { text: s.title }), el('p', { text: s.description }));
-    card.addEventListener('click', () => { ui.selected = s.id; renderCards(); updateFingerprint(); });
-    host.append(card);
-  }
+  const featured = ui.scenarios.filter((s) => s.cases?.length);
+  const others = ui.scenarios.filter((s) => !s.cases?.length);
+  const card = (s, isFeatured) => {
+    const node = el('button', { type: 'button', class: isFeatured ? 'card featured' : 'card', role: 'radio', 'aria-checked': String(s.id === ui.selected) },
+      ...(isFeatured ? [el('span', { class: 'case-count', text: `${s.cases.length} cases, loaded together with one button` })] : []),
+      el('h3', { text: s.title }), el('p', { text: s.description }),
+      ...(isFeatured ? [caseBoxes(s.cases)] : []));
+    node.addEventListener('click', () => { ui.selected = s.id; renderCards(); updateFingerprint(); });
+    return node;
+  };
+  for (const s of featured) host.append(card(s, true));
+  if (featured.length && others.length) host.append(el('h3', { class: 'cards-divider', text: 'Other scenarios — one signal each' }));
+  for (const s of others) host.append(card(s, false));
   const download = $('#business-review');
   if (download) {
     download.href = ui.selected ? `/api/scenarios/${encodeURIComponent(ui.selected)}/business-review` : '#';
@@ -403,7 +424,7 @@ async function init() {
   $('#seed').textContent = String(seed);
   $('#anchor').value = defaultAnchor;
   await refreshLoaded();
-  ui.selected = ui.state?.loaded?.scenario ?? scenarios[0]?.id ?? null;
+  ui.selected = ui.state?.loaded?.scenario ?? (scenarios.find((s) => s.cases?.length) ?? scenarios[0])?.id ?? null;
   renderCards();
   await updateFingerprint();
   drawChart();

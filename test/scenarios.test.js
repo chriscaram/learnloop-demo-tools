@@ -29,7 +29,8 @@ test('scenario files: valid, one per id, verified or experimental with reasons',
     if (def.status === 'verified') assert.ok(def.verified_against.every((v) => v.file && v.threshold));
     assert.ok(plainParameters(def).length >= 5);
     const card = publicCard(def);
-    assert.deepEqual(Object.keys(card).sort(), ['description', 'id', 'title'], 'a card shows the title and the description only: no expected finding, no parameters');
+    assert.deepEqual(Object.keys(card).filter((k) => k !== 'cases').sort(), ['description', 'id', 'title'], 'a card shows the title, the description and its prepared cases only: no expected finding, no parameters');
+    assert.ok(!JSON.stringify(card).includes('"parameters"'));
     if (def.status === 'experimental') assert.ok(def.experimental_reason.length > 100, `${def.id} says exactly why it is experimental`);
   }
   const base = getScenario('steady-state');

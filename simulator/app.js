@@ -60,16 +60,14 @@ function logLine(text, kind = '') {
 
 // ------------------------------------------------------------------ 1. scenario cards and the seal
 // A combined scenario leads, full width, with the cases it prepares drawn inside it as
-// numbered boxes (what changes, for whom, the AI agent it could lead to). One "Load this
-// scenario" loads them all. The single-signal scenarios follow as smaller cards.
+// numbered boxes (what changes, and for whom). One "Load this scenario" loads them all.
 function caseBoxes(cases) {
   const grid = el('div', { class: 'case-grid' });
   cases.forEach((c, i) => grid.append(el('div', { class: 'case' },
     el('span', { class: 'case-num', text: String(i + 1) }),
     el('h4', { text: c.title }),
     el('p', { text: c.what_changes }),
-    el('p', { class: 'case-who', text: c.who }),
-    el('p', { class: 'case-agent' }, el('strong', { text: 'AI agent it could lead to: ' }), c.ai_agent))));
+    el('p', { class: 'case-who', text: c.who }))));
   return grid;
 }
 
@@ -86,9 +84,10 @@ function renderCards() {
     node.addEventListener('click', () => { ui.selected = s.id; renderCards(); updateFingerprint(); });
     return node;
   };
-  for (const s of featured) host.append(card(s, true));
-  if (featured.length && others.length) host.append(el('h3', { class: 'cards-divider', text: 'Other scenarios — one signal each' }));
-  for (const s of others) host.append(card(s, false));
+  // While a combined scenario exists it is the only one shown; the single-signal
+  // scenarios stay available to the command line (npm run seed -- --scenario <id>).
+  if (featured.length) for (const s of featured) host.append(card(s, true));
+  else for (const s of others) host.append(card(s, false));
   const download = $('#business-review');
   if (download) {
     download.href = ui.selected ? `/api/scenarios/${encodeURIComponent(ui.selected)}/business-review` : '#';

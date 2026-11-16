@@ -94,7 +94,6 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px 
 .card.featured h3 { font-size: 1.25rem; }
 .card.featured > p { max-width: 62rem; }
 .card .case-count { color: var(--accent); font-weight: 600; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; }
-.cards-divider { grid-column: 1 / -1; margin: 0.8rem 0 -0.2rem; font-size: 1rem; color: var(--ink-soft); }
 .card.featured .case-grid { margin-top: 0.6rem; }
 .case-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1rem; }
 .case { position: relative; padding: 1.1rem 1.2rem 1.1rem 3.2rem; background: var(--surface); border: 1px solid var(--rule); border-left: 3px solid var(--accent); border-radius: 8px; }
@@ -102,12 +101,13 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px 
 .case h4 { margin: 0 0 0.4rem; font-size: 1.02rem; }
 .case p { margin: 0 0 0.5rem; color: var(--ink-soft); font-size: 0.95rem; }
 .case .case-who { color: var(--ink-muted); font-size: 0.9rem; }
-.case .case-agent { margin: 0.6rem 0 0; padding-top: 0.6rem; border-top: 1px solid var(--rule); color: var(--ink); }
 
 .seal { display: grid; grid-template-columns: 1.3fr 1fr; gap: 2rem; padding: 1.4rem; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; margin-bottom: 1.6rem; }
 .seal-text p { color: var(--ink-soft); }
 .seal-inputs { display: flex; gap: 2rem; align-items: center; color: var(--ink-soft); }
 .seal-inputs input { font: inherit; padding: 0.35rem 0.5rem; border: 1px solid var(--border-control); border-radius: 6px; margin-left: 0.4rem; }
+.fingerprint-box { align-self: center; }
+.fingerprint-note { margin: 0.7rem 0 0; color: var(--ink-soft); font-size: 0.9rem; }
 .fingerprint {
   align-self: center; font-family: var(--mono); font-size: 1.05rem; line-height: 1.7; letter-spacing: 0.04em;
   padding: 1rem 1.2rem; background: var(--sunken); border-radius: 6px; word-break: break-all; color: var(--ink);

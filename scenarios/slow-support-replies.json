@@ -1,0 +1,72 @@
+{
+  "id": "slow-support-replies",
+  "title": "Learner questions pile up",
+  "description": "About six weeks before the start date, learners start asking the support team many more questions, most of them about the same few things: certificates, billing and their account. The team of three answers more and more slowly, from the same or the next day to several days later, and a backlog of unanswered questions builds up. Everything else stays as usual.",
+  "expected_finding": "The goal of answering every learner question within one business day is missed: the agent measures, from the application's own logs, many more questions waiting longer than a business day than the goal allows, and raises a goal gap on it. This needs the presenter to confirm the goal's measurement in the console, and the measured week is real live activity after loading (see the README).",
+  "status": "experimental",
+  "experimental_reason": "The Governance Agent can only measure a goal from application logs by COUNTING log lines of one log route, filtered by level, error class or a template it parsed from literal logger calls (packages/platform/business-data/source-binding.js validateSourceBindingShape: operation must be 'count', filter takes levels / error_class / template only). It cannot pair support_request_created with support_reply_sent, compute a time between them, a ratio, or read 'value' (no time_between / ratio / avg over logs), and it does not see event names (LearnLoop's logEvent({ event }) calls are not literal-message call sites, shared.js CALL_SITE). The closest measurable shape is the daily support backlog check: one 'SupportReplyTimeout' warning per open question past one business day, counted per ISO week by error class (aws-log-source-reader.js ERROR_CLASS_PARSE). Those lines must be in CloudWatch Logs (/aws/lambda/learnloop-prod-admin, a rank-1 log route from the function's LoggingConfig): the S3 app-logs history is not usable for this (the bucket is only a rank-4 candidate, objects are chosen by LastModified, at most MAX_S3_OBJECTS_PER_RUN = 100 per read, so every read is partial and measurement skips partial aggregates). So the measured week is LIVE: the deployed check_support_backlog job reads the loaded support_requests.json every day at 07:00 UTC and logs about 33-40 warnings a day for the open backlog, i.e. 230-280 in the first complete ISO week, against the business review's stated baseline of about 1 a week and target 0 (NBF-DRIFT-GOAL_GAP fires on any negative oriented gap, packages/modules/new-evolution-opportunity/gap/index.js gapBasis; at least MIN_GROUP_SIZE = 10 lines). Not yet observed live; needs confirmation: the log route's parse coverage stays at or above PARSE_COVERAGE_FLOOR_PCT = 80 with Lambda's own platform lines in the log group, and log-route detection is API only (POST .../log-routes/detections).",
+  "parameters": {
+    "population": {
+      "regular": 195,
+      "lapsing": 145,
+      "rarelyActive": 80
+    },
+    "lapse": null,
+    "cancellations": [
+      {
+        "fromDay": -60,
+        "toDay": -31,
+        "rarelyActive": 17,
+        "stoppedLearning": 0
+      },
+      {
+        "fromDay": -30,
+        "toDay": -1,
+        "rarelyActive": 17,
+        "stoppedLearning": 0
+      }
+    ],
+    "slowdown": null,
+    "outage": null,
+    "carts": {
+      "addPerLessonSession": 0.01,
+      "addPerBrowseSession": 0.03,
+      "secondItemShare": 0.2,
+      "purchaseShare": 0.85,
+      "revisitShare": 0.15,
+      "removeShare": 0.05,
+      "change": null,
+      "personaCart": false
+    },
+    "support": {
+      "perWeekBefore": 3,
+      "perWeekAfter": 24,
+      "rise": {
+        "fromDay": -42,
+        "toDay": -28
+      },
+      "topicsBefore": {
+        "billing": 3,
+        "certificate": 2,
+        "account": 3,
+        "course_content": 3,
+        "other": 1
+      },
+      "topicsAfter": {
+        "certificate": 9,
+        "billing": 5,
+        "account": 4,
+        "course_content": 1.5,
+        "other": 0.5
+      },
+      "replyMedianHoursBefore": 3,
+      "replyMedianHoursAfter": 200,
+      "slowdown": {
+        "fromDay": -40,
+        "toDay": -26
+      },
+      "replySpread": 0.55,
+      "personaQuestion": true
+    }
+  }
+}

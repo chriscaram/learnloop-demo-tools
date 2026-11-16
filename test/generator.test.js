@@ -17,9 +17,13 @@ let appRecords;
 let anchorMs;
 const dayOf = (iso) => Math.floor((Date.parse(iso) - anchorMs) / DAY_MS);
 
+// The state domains that existed before carts and support questions. lapsed-learners
+// writes the two new ones as empty files (checked below); every other byte is pinned.
+const PRE_CART_DOMAINS = ['users', 'courses', 'lessons', 'enrolments', 'progress', 'subscriptions', 'notifications', 'quiz_results'];
+
 function digest(r) {
   const hash = createHash('sha256');
-  for (const [domain, value] of Object.entries(r.data)) hash.update(domain).update(formatJson(value));
+  for (const domain of PRE_CART_DOMAINS) hash.update(domain).update(formatJson(r.data[domain]));
   for (const [key, body] of r.appLogs) hash.update(key).update(body);
   for (const [key, body] of r.cloudfront) hash.update(key).update(body);
   return hash.digest('hex');
@@ -47,6 +51,16 @@ const PRE_SCENARIO_DIGEST = '6ad44fd7990267fbc666e343893a1df0c4b0230cb556dffcc99
 test('lapsed-learners is byte-identical to the generator before scenarios (committed fingerprint)', () => {
   assert.equal(result.stats.scenario, 'lapsed-learners');
   assert.equal(digest(result), PRE_SCENARIO_DIGEST);
+});
+
+test('lapsed-learners: the cart and support state files exist and are empty; no cart or support log line', () => {
+  assert.deepEqual(Object.keys(result.data), [...PRE_CART_DOMAINS, 'carts', 'support_requests']);
+  assert.equal(formatJson(result.data.carts), '[]\n');
+  assert.equal(formatJson(result.data.support_requests), '[]\n');
+  const routes = new Set(appRecords.map((a) => a.record['http.route']).filter(Boolean));
+  for (const route of ['/api/me/cart', '/api/me/cart/items', '/api/me/cart/items/{courseId}', '/api/me/support-requests', '/api/admin/support-requests']) assert.ok(!routes.has(route), route);
+  for (const event of ['cart_item_added', 'cart_item_removed', 'support_request_created', 'support_reply_sent']) assert.ok(!appRecords.some((a) => a.record.event === event), event);
+  assert.ok(!appRecords.some((a) => a.record['error.type'] === 'SupportReplyTimeout'));
 });
 
 test('history: distinct learners on the learning routes, 30-day windows (±5%)', () => {

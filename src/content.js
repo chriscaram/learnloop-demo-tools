@@ -253,3 +253,69 @@ export const HOURLY_WEIGHTS = [
 
 /** Day-of-week multipliers, Sunday first; mean is 1. */
 export const WEEKDAY_FACTORS = [0.72, 1.12, 1.14, 1.13, 1.1, 1.05, 0.74];
+
+// Questions learners send from the Help page, by topic (free text, stored in the state,
+// never logged), and the replies staff send back.
+export const SUPPORT_QUESTIONS = {
+  billing: [
+    'I was charged twice this month. Can you check my payment, please?',
+    'Can I get an invoice with my company name on it for the monthly plan?',
+    'My card expired. How do I update my payment details before the next renewal?',
+    'I cancelled last week but I still see a renewal date. Will I be charged again?',
+    'Is there a yearly plan or a discount if I pay for several months at once?',
+    'The receipt shows the wrong country for tax. How can I correct it?',
+  ],
+  certificate: [
+    'I finished all the lessons of my course. Where can I download my certificate?',
+    'Do you issue certificates of completion? My employer asks for one.',
+    'Can I add my LearnLoop certificate to my LinkedIn profile?',
+    'My name is spelled wrong on the course completion page. Can that be fixed before I get a certificate?',
+    'I completed the course but it still shows one lesson as started. Will that stop the certificate?',
+    'Does the certificate show the number of hours of the course?',
+  ],
+  account: [
+    'How do I change the e-mail address of my account?',
+    'I cannot sign in on my phone, the page keeps sending me back to the login.',
+    'Can I share my subscription with a colleague on my team?',
+    'Please delete the old account I created with my personal address.',
+    'How do I turn off the e-mails about new courses?',
+    'Is there a way to see my learning history from last year?',
+  ],
+  course_content: [
+    'The code example in lesson 4 does not work with the current version of the tool.',
+    'Is there a transcript or a written version of the video lessons?',
+    'One quiz answer looks wrong to me. Could someone check question 2?',
+    'Will there be an advanced follow-up to this course?',
+    'The exercise files mentioned in the lesson are not attached. Where can I find them?',
+  ],
+  other: [
+    'Do you offer team plans for companies?',
+    'Is LearnLoop available in Spanish?',
+    'I would like to suggest a course on data privacy.',
+  ],
+};
+
+export const SUPPORT_REPLIES = {
+  billing: [
+    'Thanks for reaching out. We checked your account: there is a single charge for this month, the second line is a pending authorisation that disappears within a few days.',
+    'You can download every receipt from the Subscription page. We have also added your company name to the latest one.',
+    'You can update your card on the Subscription page at any time before the renewal date. Nothing else is needed.',
+  ],
+  certificate: [
+    'Certificates of completion are not available yet. Your completed lessons are saved on your dashboard, and we will let you know as soon as certificates arrive.',
+    'Thanks for asking. Completion certificates are on our roadmap; until then your dashboard shows every course you completed with the date.',
+  ],
+  account: [
+    'We have updated your account as requested. Please sign out and in again to see the change.',
+    'Each subscription is personal for now, so every member of your team needs their own account.',
+    'You can manage e-mail notifications from your account menu. We have also switched them off for you.',
+  ],
+  course_content: [
+    'Thanks for spotting this. We have corrected the lesson and the change is live.',
+    'Thank you for the suggestion. We have passed it to the instructor and will update the course.',
+  ],
+  other: [
+    'Thanks for your message. We have shared your suggestion with the team.',
+    'LearnLoop is English only for now. We will let you know if that changes.',
+  ],
+};

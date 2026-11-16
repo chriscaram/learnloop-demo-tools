@@ -44,6 +44,12 @@ const API_BYTES = {
   '/api/admin/flags': 420,
   '/api/admin/flags/{flagKey}': 380,
   '/api/admin/learners/{userId}/message': 400,
+  '/api/me/cart': 1500,
+  '/api/me/cart/items': 1500,
+  '/api/me/cart/items/{courseId}': 900,
+  '/api/me/support-requests': 1800,
+  '/api/admin/support-requests': 5200,
+  '/api/admin/support-requests/{requestId}/reply': 900,
 };
 
 const pad = (n, w = 2) => String(n).padStart(w, '0');
@@ -179,6 +185,10 @@ export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, 
       userPseudoId: pu(e.userId),
       event: e.event, entityType: e.entityType, entityId: e.entityId, actorType: e.actorType,
     }));
+  }
+
+  for (const l of sim.systemLogs ?? []) {
+    pushApp(l.service, l.ts, buildLogRecord({ ...common(l.service, l.ts, l), level: l.level, message: l.message, errorType: l.errorType }));
   }
 
   const appLogs = new Map();

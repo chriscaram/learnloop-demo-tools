@@ -2,8 +2,11 @@
 // request stream (turned into CloudFront and application logs by emit.js) and
 // the end state (written as data/seed/*.json), so the two always agree.
 import { addMonths } from './contract/billing.js';
+import { BACKLOG_JOB, SUPPORT_REPLY_NOTIFICATION } from './contract/actions.js';
+import { replyDueAt } from './contract/support.js';
 import {
-  BROWSER_USER_AGENTS, COURSES, EDGE_LOCATIONS, FIRST_NAMES, HOURLY_WEIGHTS, LAST_NAMES, WEEKDAY_FACTORS,
+  BROWSER_USER_AGENTS, COURSES, EDGE_LOCATIONS, FIRST_NAMES, HOURLY_WEIGHTS, LAST_NAMES, SUPPORT_QUESTIONS, SUPPORT_REPLIES,
+  WEEKDAY_FACTORS,
 } from './content.js';
 import { createRng } from './rng.js';
 import { getScenario } from './scenarios.js';
@@ -41,6 +44,10 @@ const ANA_LESSON_SCRIPT = [
   [-44, 2, false], [-40, 2, true], [-37, 3, false], [-33, 3, false],
 ];
 const ANA_VISIT_DAYS = [-30, -27, -24, -22, -19, -16, -13, -10, -8, -5, -3, -1];
+// Ana's unanswered question (support.personaQuestion): asked on one of her visit days
+const ANA_QUESTION = { day: -5, topic: 'certificate', body: 'I am working through Cloud Foundations. Will I get a certificate when I finish it, and can I add it to my LinkedIn profile?' };
+// Marco's cart (carts.personaCart): [day, course key, opens the checkout page and leaves]
+const MARCO_CART_SCRIPT = [[-16, 'python', false], [-9, 'dataviz', true]];
 
 const STAFF_MESSAGES = [
   ['Your invoice copy', 'As requested, a copy of your latest receipt is available on the Subscription page.'],
@@ -200,6 +207,32 @@ export function simulate({ anchor, seed, scenario = undefined }) {
       u.stopDay = outage.toDay;
     }
   }
+
+  // carts and support questions: each from its own streams, drawn only when the scenario
+  // has them, so a scenario without them produces exactly what it did before they existed
+  const C = P.carts ?? null;
+  const S = P.support ?? null;
+  const cartRng = createRng(seed, 'carts');
+  const supRng = createRng(seed, 'support');
+  const xRng = createRng(seed, 'sessions-extra');
+  const xIdRng = createRng(seed, 'ids-extra');
+  const newExtraId = (prefix) => {
+    let id;
+    do id = `${prefix}_${xIdRng.hex(12)}`; while (usedIds.has(id));
+    usedIds.add(id);
+    return id;
+  };
+  for (const u of [...learners, ...staff]) u.cart = [];
+  if (C?.change) {
+    // who stops completing the checkout, and from which day (spread evenly over the span)
+    const order = cartRng.shuffle(learners.slice(2));
+    const abandoners = order.slice(0, Math.round(order.length * C.change.abandonShare));
+    const span = C.change.toDay - C.change.fromDay + 1;
+    abandoners.forEach((u, i) => { u.abandonsFromDay = C.change.fromDay + Math.floor((i * span) / abandoners.length); });
+  }
+  const purchaseShare = (u, day) => (u.abandonsFromDay !== undefined && day >= u.abandonsFromDay ? 0 : C.purchaseShare);
+  const supportRequests = [];
+  const systemLogs = [];
 
   // cancellation schedule: [first day, last day, how many from cohort C, how many from cohort B]
   const cxRng = createRng(seed, 'cancellations');
@@ -414,6 +447,8 @@ export function simulate({ anchor, seed, scenario = undefined }) {
     return Math.max(4, Math.round(netRng.lognormal(median, 0.3)));
   };
 
+  const extraLatency = (day) => Math.max(4, Math.round(xRng.lognormal(36 * (latencyNoise.get(`${day}:fast`) ?? 1), 0.3)));
+
   for (let day = -HISTORY_DAYS; day <= -1; day += 1) {
     const start = dayStart(day);
     const dow = new Date(start).getUTCDay();
@@ -453,6 +488,10 @@ export function simulate({ anchor, seed, scenario = undefined }) {
       }
       if (u.persona === 'marco' && day === -1) {
         plans.push({ user: u, type: 'lesson' });
+        continue;
+      }
+      if (u.persona === 'marco' && C?.personaCart && MARCO_CART_SCRIPT.some(([d]) => d === day)) {
+        plans.push({ user: u, type: 'browse' });
         continue;
       }
       if (u.group === 'cohortC') {
@@ -524,9 +563,11 @@ export function simulate({ anchor, seed, scenario = undefined }) {
       }
     }
     plans.sort((a, b) => a.startMs - b.startMs);
+    if (S) planSupportQuestions(plans, day, dow);
 
     const dayRequests = [];
     for (const p of plans) runSession(p, day, dayRequests);
+    if (S) runBacklogCheck(start);
 
     // a well-known crawler on public pages, about 1% of requests
     const crawlerCount = Math.round(dayRequests.length * 0.0102);
@@ -550,21 +591,27 @@ export function simulate({ anchor, seed, scenario = undefined }) {
     const rng = simRng;
     let now = plan.startMs;
     const version = versionAt(now);
-    const session = { id: null, page: '/' };
+    const session = { id: null, page: '/', clock: () => now };
     const base = { ua: u.ua, ip: u.ip, edge: u.edge };
 
-    const api = (service, method, route, path, { status = 200, events = [] } = {}) => {
-      const latencyMs = routeLatency(day, route, now);
+    // `extra`: a request of the cart or support features, drawn from its own stream
+    const api = (service, method, route, path, { status = 200, events = [], extra = false } = {}) => {
+      const r = extra ? xRng : rng;
+      const latencyMs = extra ? extraLatency(day) : routeLatency(day, route, now);
       const req = {
         kind: 'api', ts: now, service, method, route, path, status, latencyMs, ...base,
         userId: session.id ? u.id : null, sessionId: session.id, referer: session.page,
-        version: version.version, requestId: `${rng.chars(15)}=`, traceId: rng.hex(32), events: [],
+        version: version.version, requestId: `${r.chars(15)}=`, traceId: r.hex(32), events: [],
       };
       events.forEach((e, i) => req.events.push({ ...e, ts: now + Math.round(latencyMs * 0.6) + i }));
       out.push(req);
-      now += latencyMs + rng.int(20, 250);
+      now += latencyMs + r.int(20, 250);
       return req;
     };
+    const xApi = (service, method, route, path, opts = {}) => api(service, method, route, path, { ...opts, extra: true });
+    const xThink = (minS, maxS) => { now += xRng.int(minS * 1000, maxS * 1000); };
+    session.xApi = xApi;
+    session.xThink = xThink;
     const think = (minS, maxS) => { now += rng.int(minS * 1000, maxS * 1000); };
     const actor = u.isStaff ? 'staff' : 'learner';
     const ev = (event, extra = {}) => ({ event, actorType: actor, ...extra });
@@ -593,6 +640,7 @@ export function simulate({ anchor, seed, scenario = undefined }) {
     }
     session.id = `ses_${rng.hex(16)}`;
     api('identity', 'POST', '/api/auth/login', '/api/auth/login', { events: [ev('user_signed_in')] });
+    if (C) xApi('catalog', 'GET', '/api/me/cart', '/api/me/cart'); // the cart loads at sign-in
 
     let pollStart;
     if (u.isStaff) {
@@ -605,6 +653,7 @@ export function simulate({ anchor, seed, scenario = undefined }) {
         think(5, 20);
         api('admin', 'PUT', '/api/admin/flags/{flagKey}', '/api/admin/flags/new_catalog_filters', { events: [ev('feature_flag_changed', { entityType: 'feature_flag', entityId: 'new_catalog_filters' })] });
       }
+      if (S) answerQuestions(u, xApi, xThink, session);
       for (let i = 0; i < plan.messages; i += 1) {
         think(60, 300);
         const eligible = learners.filter((x) => !x.cancelled && !x.persona);
@@ -652,6 +701,8 @@ export function simulate({ anchor, seed, scenario = undefined }) {
         }
         think(10, 60);
       }
+      if (S) supportVisit(plan, u, xApi, xThink, session);
+      if (C && !u.cancelled) shop(plan, u, day, xApi, xThink, session);
     }
     // the bell polls the unread count every 30 seconds while the page is open
     const signsOut = rng.chance(u.isStaff ? 0.3 : 0.25);
@@ -707,7 +758,15 @@ export function simulate({ anchor, seed, scenario = undefined }) {
       completes = plan.script.completes;
     } else {
       let courseId = currentCourse(u);
-      if (!courseId && u.persona !== 'marco') {
+      if (!courseId && u.persona !== 'marco' && C) {
+        // with the cart: the next course is bought through it (or stays in it)
+        courseId = acquireThroughCart(u, day, plan, session);
+        if (!courseId && u.enrolled.length) {
+          // nothing new to start: they go back over lessons of a course they already have
+          reviewLessons(u, api, think, session);
+          return true;
+        }
+      } else if (!courseId && u.persona !== 'marco') {
         const course = chooseNewCourse(rng, u, plan.startMs);
         if (course) {
           session.page = '/courses';
@@ -721,7 +780,10 @@ export function simulate({ anchor, seed, scenario = undefined }) {
           courseId = course.id;
         }
       }
-      if (!courseId) courseId = u.enrolled.at(-1).course_id;
+      if (!courseId) {
+        if (!u.enrolled.length) return false; // nothing to open yet: the course is still in the cart
+        courseId = u.enrolled.at(-1).course_id;
+      }
       lesson = nextLesson(u, courseId) ?? lessonsByCourse.get(courseId).at(-1);
       const wasStarted = u.lessonState.get(lesson.id)?.status === 'started';
       completes = rng.chance(wasStarted ? 0.8 : 0.62);
@@ -772,6 +834,255 @@ export function simulate({ anchor, seed, scenario = undefined }) {
     return true;
   }
 
+  // ---------------------------------------------------------------- carts
+  function addableCourses(u, ms) {
+    const taken = new Set([...u.enrolled.map((e) => e.course_id), ...u.cart.map((i) => i.course_id)]);
+    return courses.filter((c) => !taken.has(c.id) && Date.parse(c.published_at) < ms);
+  }
+
+  function openAndAdd(u, course, xApi, xThink, session) {
+    session.page = `/courses/${course.id}`;
+    xApi('catalog', 'GET', '/api/courses/{courseId}', `/api/courses/${course.id}`, { events: [{ event: 'course_opened', entityType: 'course', entityId: course.id, actorType: 'learner' }] });
+    xThink(20, 120);
+    const req = xApi('catalog', 'POST', '/api/me/cart/items', '/api/me/cart/items', { events: [{ event: 'cart_item_added', entityType: 'course', entityId: course.id, actorType: 'learner' }] });
+    u.cart.push({ course_id: course.id, added_at: iso(req.events[0].ts) });
+  }
+
+  // From the cart page or straight from "Buy now": the checkout page reads the
+  // subscription, "Complete Checkout" reads it again and enrols in every course in the
+  // cart; enrolling takes each course out of the server cart, and the page re-reads it.
+  function checkout(u, viaCartPage, xApi, xThink, session) {
+    if (viaCartPage) {
+      session.page = '/cart';
+      xApi('catalog', 'GET', '/api/courses', '/api/courses', { events: [{ event: 'catalog_viewed', actorType: 'learner' }] });
+      xThink(10, 40);
+    }
+    session.page = '/checkout';
+    xApi('billing', 'GET', '/api/me/subscription', '/api/me/subscription');
+    xThink(20, 90);
+    xApi('billing', 'GET', '/api/me/subscription', '/api/me/subscription');
+    for (const item of [...u.cart]) {
+      const req = xApi('catalog', 'POST', '/api/courses/{courseId}/enrol', `/api/courses/${item.course_id}/enrol`, { events: [{ event: 'course_enrolled', entityType: 'course', entityId: item.course_id, actorType: 'learner' }] });
+      u.enrolled.push({ id: newExtraId('enr'), user_id: u.id, course_id: item.course_id, enrolled_at: iso(req.events[0].ts) });
+      if (!u.activity.has(item.course_id)) u.activity.set(item.course_id, null);
+      u.purchases = (u.purchases ?? 0) + 1;
+    }
+    u.cart = [];
+    xApi('catalog', 'GET', '/api/me/cart', '/api/me/cart');
+  }
+
+  function viewCart(xApi, xThink, session) {
+    session.page = '/cart';
+    xThink(3, 10);
+    xApi('catalog', 'GET', '/api/courses', '/api/courses', { events: [{ event: 'catalog_viewed', actorType: 'learner' }] });
+    xThink(10, 40);
+  }
+
+  // A learner who has finished every course they are enrolled in gets the next one
+  // through the cart: what is already in it, or a new course. Returns the course id
+  // bought, or null when the checkout is not completed (the course stays in the cart).
+  function acquireThroughCart(u, day, plan, session) {
+    const { xApi, xThink } = session;
+    const share = purchaseShare(u, day);
+    if (u.cart.length && share > 0) {
+      viewCart(xApi, xThink, session);
+      if (cartRng.chance(share)) {
+        const first = u.cart[0].course_id;
+        checkout(u, false, xApi, xThink, session);
+        return first;
+      }
+      return null;
+    }
+    if (u.cart.length && !cartRng.chance(C.change?.abandonerAddShare ?? 0)) {
+      if (cartRng.chance(C.revisitShare)) viewCart(xApi, xThink, session);
+      return null;
+    }
+    const options = addableCourses(u, plan.startMs);
+    if (!options.length) return null;
+    session.page = '/courses';
+    xApi('catalog', 'GET', '/api/courses', '/api/courses', { events: [{ event: 'catalog_viewed', actorType: 'learner' }] });
+    xThink(5, 20);
+    const course = cartRng.weighted(options, (c) => c._popularity);
+    openAndAdd(u, course, xApi, xThink, session);
+    if (!cartRng.chance(share)) return null;
+    xThink(5, 20);
+    checkout(u, cartRng.chance(0.5), xApi, xThink, session);
+    return course.id;
+  }
+
+  // Two lessons opened again from courses the learner already has (no progress to record).
+  function reviewLessons(u, api, think, session) {
+    for (let i = 0; i < 2; i += 1) {
+      const course = cartRng.pick(u.enrolled).course_id;
+      const lesson = cartRng.pick(lessonsByCourse.get(course));
+      think(1, 4);
+      session.page = `/lessons/${lesson.id}`;
+      api('learning', 'GET', '/api/lessons/{lessonId}', `/api/lessons/${lesson.id}`);
+      api('learning', 'GET', '/api/courses/{courseId}/lessons', `/api/courses/${lesson.course_id}/lessons`);
+      think(60, 240);
+    }
+  }
+
+  // Shopping beyond the next course: a look at the cart, or a course put in it for later.
+  function shop(plan, u, day, xApi, xThink, session) {
+    if (u.persona === 'marco' && C.personaCart) {
+      for (const [d, key, opensCheckout] of MARCO_CART_SCRIPT) {
+        if (d !== day) continue;
+        xThink(5, 30);
+        openAndAdd(u, courseByKey.get(key), xApi, xThink, session);
+        if (opensCheckout) {
+          // he reaches the checkout page and leaves without completing it
+          xThink(5, 20);
+          session.page = '/checkout';
+          xApi('billing', 'GET', '/api/me/subscription', '/api/me/subscription');
+          xThink(30, 90);
+        }
+      }
+      return;
+    }
+    if (u.persona) return;
+    const share = purchaseShare(u, day);
+    let buys = false;
+    let viaCartPage = true;
+    if (u.cart.length && cartRng.chance(C.revisitShare)) {
+      buys = cartRng.chance(share);
+      if (!buys) viewCart(xApi, xThink, session);
+    } else if (cartRng.chance(plan.type === 'browse' ? C.addPerBrowseSession : C.addPerLessonSession)) {
+      const count = cartRng.chance(C.secondItemShare) ? 2 : 1;
+      xThink(5, 30);
+      for (let i = 0; i < count; i += 1) {
+        const options = addableCourses(u, plan.startMs);
+        if (!options.length) break;
+        openAndAdd(u, cartRng.weighted(options, (c) => c._popularity), xApi, xThink, session);
+      }
+      buys = u.cart.length > 0 && cartRng.chance(share);
+      viaCartPage = cartRng.chance(0.5);
+    }
+    if (buys) {
+      xThink(5, 20);
+      checkout(u, viaCartPage, xApi, xThink, session);
+    } else if (u.cart.length && cartRng.chance(C.removeShare)) {
+      const item = cartRng.pick(u.cart);
+      session.page = '/cart';
+      xThink(5, 20);
+      xApi('catalog', 'DELETE', '/api/me/cart/items/{courseId}', `/api/me/cart/items/${item.course_id}`, { events: [{ event: 'cart_item_removed', entityType: 'course', entityId: item.course_id, actorType: 'learner' }] });
+      u.cart = u.cart.filter((x) => x !== item);
+    }
+  }
+
+  // ---------------------------------------------------------------- support questions
+  function ramp(day, from, to) {
+    return day <= from ? 0 : day >= to ? 1 : (day - from) / (to - from);
+  }
+  function lerp(a, b, f) {
+    return a + (b - a) * f;
+  }
+  function poisson(rng, mean) {
+    const limit = Math.exp(-mean);
+    let k = 0;
+    let p = rng.next();
+    while (p > limit) { k += 1; p *= rng.next(); }
+    return k;
+  }
+
+  // Which of today's learner visits include a question to the team.
+  function planSupportQuestions(plans, day, dow) {
+    const weekend = dow === 0 || dow === 6;
+    const f = S.rise ? ramp(day, S.rise.fromDay, S.rise.toDay) : 0;
+    const perWeek = lerp(S.perWeekBefore, S.perWeekAfter, f);
+    const count = poisson(supRng, (perWeek / 7) * (weekend ? 0.6 : 1.12));
+    const candidates = plans.filter((p) => !p.user.isStaff && !p.user.persona && (p.type === 'lesson' || p.type === 'browse'));
+    for (let i = 0; i < count && candidates.length; i += 1) {
+      const plan = supRng.pick(candidates);
+      const topics = supRng.chance(f) ? S.topicsAfter : S.topicsBefore;
+      const topic = supRng.weighted(Object.entries(topics))[0];
+      const body = supRng.pick(SUPPORT_QUESTIONS[topic]);
+      const delayHours = supRng.lognormal(lerp(S.replyMedianHoursBefore, S.replyMedianHoursAfter, S.slowdown ? ramp(day, S.slowdown.fromDay, S.slowdown.toDay) : 0), S.replySpread);
+      (plan.supportAsks ??= []).push({ topic, body, delayHours });
+    }
+    if (S.personaQuestion && day === ANA_QUESTION.day) {
+      const ana = plans.find((p) => p.user.persona === 'ana');
+      if (ana) (ana.supportAsks ??= []).push({ topic: ANA_QUESTION.topic, body: ANA_QUESTION.body, delayHours: Infinity });
+    }
+  }
+
+  // A learner on the Help page: asks today's question(s), or reads a reply that arrived.
+  function supportVisit(plan, u, xApi, xThink, session) {
+    const unread = (u.supportReplies ?? []).filter((n) => !n.read_at);
+    if (unread.length && supRng.chance(0.75)) {
+      // the bell, then the reply notification, which opens the Help page
+      xThink(2, 10);
+      xApi('notifications', 'GET', '/api/me/notifications', '/api/me/notifications');
+      for (const n of unread) {
+        xThink(2, 8);
+        const req = xApi('notifications', 'POST', '/api/me/notifications/{notificationId}/read', `/api/me/notifications/${n.id}/read`, {
+          events: [{ event: 'notification_opened', entityType: 'notification', entityId: n.id, actorType: 'learner' }],
+        });
+        n.read_at = iso(req.events[0].ts);
+      }
+      session.page = '/help';
+      xApi('notifications', 'GET', '/api/me/support-requests', '/api/me/support-requests');
+      xThink(20, 90);
+    }
+    for (const ask of plan.supportAsks ?? []) {
+      xThink(5, 30);
+      session.page = '/help';
+      xApi('notifications', 'GET', '/api/me/support-requests', '/api/me/support-requests');
+      xThink(40, 240);
+      const id = newExtraId('sup');
+      const req = xApi('notifications', 'POST', '/api/me/support-requests', '/api/me/support-requests', {
+        events: [{ event: 'support_request_created', entityType: 'support_request', entityId: id, actorType: 'learner' }],
+      });
+      const createdMs = req.events[0].ts;
+      supportRequests.push({
+        id, user_id: u.id, topic: ask.topic, body: ask.body, created_at: iso(createdMs), status: 'open', replies: [], answered_at: null,
+        _replyFromMs: createdMs + ask.delayHours * 3600_000, _learner: u,
+      });
+    }
+  }
+
+  // A staff member on the Admin page answers every open question whose reply time has come, oldest first.
+  function answerQuestions(staffMember, xApi, xThink, session) {
+    const startMs = session.clock();
+    const due = supportRequests.filter((r) => r.status === 'open' && r._replyFromMs <= startMs && Date.parse(r.created_at) < startMs - 60_000);
+    const open = supportRequests.some((r) => r.status === 'open');
+    if (!due.length && !(open && supRng.chance(0.3))) return;
+    xThink(5, 30);
+    session.page = '/admin';
+    xApi('admin', 'GET', '/api/admin/support-requests', '/api/admin/support-requests');
+    for (const r of due) {
+      xThink(60, 300);
+      const notificationId = newExtraId('ntf');
+      const body = supRng.pick(SUPPORT_REPLIES[r.topic]);
+      const req = xApi('admin', 'POST', '/api/admin/support-requests/{requestId}/reply', `/api/admin/support-requests/${r.id}/reply`);
+      const at = req.ts + Math.round(req.latencyMs * 0.5);
+      req.events.push(
+        { event: 'notification_created', entityType: 'notification', entityId: notificationId, actorType: 'system', ts: at },
+        { event: 'support_reply_sent', entityType: 'support_request', entityId: r.id, actorType: 'staff', ts: at + 1 },
+      );
+      r.replies.push({ staff_id: staffMember.id, body, created_at: iso(at) });
+      r.status = 'answered';
+      r.answered_at = iso(at);
+      const n = {
+        id: notificationId, user_id: r.user_id, type: SUPPORT_REPLY_NOTIFICATION.type, title: SUPPORT_REPLY_NOTIFICATION.title,
+        body, link: SUPPORT_REPLY_NOTIFICATION.link, created_at: iso(at), read_at: null,
+      };
+      notifications.push(n);
+      (r._learner.supportReplies ??= []).push(n);
+    }
+  }
+
+  // The admin function's daily check (07:00 UTC): one warning per open question past its reply time.
+  function runBacklogCheck(dayStartMs) {
+    const at = dayStartMs + BACKLOG_JOB.hourUtc * 3600_000 + supRng.int(200, 1800);
+    const requestId = supRng.uuid();
+    const traceId = supRng.hex(32);
+    const overdue = supportRequests.filter((r) => Date.parse(r.created_at) < at && (!r.answered_at || Date.parse(r.answered_at) > at) && replyDueAt(r.created_at).getTime() <= at);
+    overdue.forEach((r, i) => {
+      systemLogs.push({ service: BACKLOG_JOB.service, ts: at + 40 + i * 3, requestId, traceId, level: BACKLOG_JOB.level, message: BACKLOG_JOB.message, errorType: BACKLOG_JOB.errorType });
+    });
+  }
+
   // ---------------------------------------------------------------- end state
   const users = [...staff, ...learners]
     .map((u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, created_at: u.created_at }))
@@ -790,12 +1101,18 @@ export function simulate({ anchor, seed, scenario = undefined }) {
     subscriptions: subscriptions.sort((a, b) => a.started_at.localeCompare(b.started_at)),
     notifications: notifications.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)),
     quiz_results: quizResults.sort((a, b) => a.submitted_at.localeCompare(b.submitted_at)),
+    carts: [...learners, ...staff].filter((u) => u.cart.length).sort((a, b) => a.id.localeCompare(b.id))
+      .map((u) => ({ user_id: u.id, items: [...u.cart].sort((a, b) => a.added_at.localeCompare(b.added_at)) })),
+    support_requests: supportRequests
+      .map(({ _replyFromMs, _learner, ...r }) => r)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)),
   };
 
   requests.sort((a, b) => a.ts - b.ts);
   systemEvents.sort((a, b) => a.ts - b.ts);
+  systemLogs.sort((a, b) => a.ts - b.ts);
   return {
-    anchorMs, data, requests, systemEvents, versions, learners, staff, scenario: def,
+    anchorMs, data, requests, systemEvents, systemLogs, versions, learners, staff, scenario: def,
     slowRelease: slowRelease ? { version: slowRelease.version, from: iso(slowRelease.fromMs) } : null,
     groups: {
       cohortA: cohortA.map((u) => u.id), cohortB: cohortB.map((u) => u.id), cohortC: cohortC.map((u) => u.id),

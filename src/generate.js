@@ -1,5 +1,7 @@
 // Entry point used by the CLI, the upload script and the tests.
 import { DAY_MS, HISTORY_DAYS, LEARNING_ROUTES, simulate } from './model.js';
+import { BACKLOG_JOB } from './contract/actions.js';
+import { replyDueAt } from './contract/support.js';
 import { emitLogs } from './emit.js';
 import { DEFAULT_SCENARIO, getScenario } from './scenarios.js';
 
@@ -125,6 +127,106 @@ export function computeStats(sim, logs) {
     slowRelease: sim.slowRelease,
     ...detectorView(sim, api, dayOf, learnerIds),
     daily: dailySeries(sim, api, dayOf, learnerIds),
+    carts: cartView(sim, api, dayOf),
+    support: supportView(sim, dayOf),
+  };
+}
+
+/** Enrolment and cart routes, the support routes: what a route-level distinct-actor window counts. */
+export const COMMERCE_ROUTES = Object.freeze([
+  '/api/courses/{courseId}/enrol', '/api/me/cart', '/api/me/cart/items', '/api/me/cart/items/{courseId}',
+  '/api/me/support-requests', '/api/admin/support-requests', '/api/admin/support-requests/{requestId}/reply',
+]);
+
+/**
+ * Per route and detector window: distinct signed-in users, distinct client IPs (the
+ * CloudFront actor key is a keyed hash of c-ip, so shared addresses count once), and
+ * requests. Then the cart's end state.
+ */
+function cartView(sim, api, dayOf) {
+  const windows = { earlier: [-59, -30], recent: [-29, -1] };
+  const actors = {};
+  for (const [name, [from, to]] of Object.entries(windows)) {
+    const inWin = api.filter((r) => { const d = dayOf(r.ts); return d >= from && d <= to; });
+    actors[name] = Object.fromEntries(COMMERCE_ROUTES.map((route) => {
+      const rows = inWin.filter((r) => r.route === route);
+      return [route, { users: new Set(rows.filter((r) => r.userId).map((r) => r.userId)).size, ips: new Set(rows.map((r) => r.ip)).size, requests: rows.length }];
+    }));
+  }
+  const drop = (route, key) => {
+    const a = actors.earlier[route][key];
+    return a ? Math.round(((a - actors.recent[route][key]) / a) * 1000) / 10 : null;
+  };
+  const events = (name, from, to) => api.reduce((n, r) => n + r.events.filter((e) => e.event === name && dayOf(e.ts) >= from && dayOf(e.ts) <= to).length, 0);
+  const carts = sim.data.carts;
+  const items = carts.flatMap((c) => c.items);
+  return {
+    actorWindows: actors,
+    enrolDropPct: { users: drop('/api/courses/{courseId}/enrol', 'users'), ips: drop('/api/courses/{courseId}/enrol', 'ips') },
+    cartAddDropPct: { users: drop('/api/me/cart/items', 'users'), ips: drop('/api/me/cart/items', 'ips') },
+    cartReadDropPct: { users: drop('/api/me/cart', 'users'), ips: drop('/api/me/cart', 'ips') },
+    events: Object.fromEntries(Object.entries(windows).map(([name, [from, to]]) => [name, {
+      cartItemsAdded: events('cart_item_added', from, to),
+      cartItemsRemoved: events('cart_item_removed', from, to),
+      enrolments: events('course_enrolled', from, to),
+    }])),
+    endState: {
+      learnersWithItems: carts.length,
+      items: items.length,
+      oldestItemDay: items.length ? Math.min(...items.map((i) => dayOf(Date.parse(i.added_at)))) : null,
+      newestItemDay: items.length ? Math.max(...items.map((i) => dayOf(Date.parse(i.added_at)))) : null,
+    },
+  };
+}
+
+/** ISO weeks (Monday to Sunday) inside days -60..-1: questions asked and answered, reply times, the open backlog, the daily check's warnings. */
+function supportView(sim, dayOf) {
+  const requests = sim.data.support_requests;
+  const warnings = (sim.systemLogs ?? []).filter((l) => l.errorType === BACKLOG_JOB.errorType);
+  const median = (xs) => {
+    if (!xs.length) return null;
+    const sorted = [...xs].sort((a, b) => a - b);
+    return Math.round(sorted[Math.floor(sorted.length / 2)] * 10) / 10;
+  };
+  const weeks = [];
+  const firstMonday = (() => {
+    let d = -HISTORY_DAYS;
+    while (new Date(sim.anchorMs + d * DAY_MS).getUTCDay() !== 1) d += 1;
+    return d;
+  })();
+  for (let start = firstMonday; start + 6 <= -1; start += 7) {
+    const end = start + 6;
+    const fromMs = sim.anchorMs + start * DAY_MS;
+    const toMs = sim.anchorMs + (end + 1) * DAY_MS;
+    const asked = requests.filter((r) => { const t = Date.parse(r.created_at); return t >= fromMs && t < toMs; });
+    const answered = requests.filter((r) => r.answered_at && Date.parse(r.answered_at) >= fromMs && Date.parse(r.answered_at) < toMs);
+    weeks.push({
+      days: `${start}..${end}`,
+      from: new Date(fromMs).toISOString().slice(0, 10),
+      asked: asked.length,
+      answered: answered.length,
+      medianReplyHours: median(answered.map((r) => (Date.parse(r.answered_at) - Date.parse(r.created_at)) / 3_600_000)),
+      answeredWithinTarget: answered.filter((r) => Date.parse(r.answered_at) <= replyDueAt(r.created_at).getTime()).length,
+      openAtEnd: requests.filter((r) => Date.parse(r.created_at) < toMs && (!r.answered_at || Date.parse(r.answered_at) >= toMs)).length,
+      backlogWarnings: warnings.filter((w) => w.ts >= fromMs && w.ts < toMs).length,
+      topics: asked.reduce((acc, r) => ({ ...acc, [r.topic]: (acc[r.topic] ?? 0) + 1 }), {}),
+    });
+  }
+  const anchorDate = new Date(sim.anchorMs);
+  const open = requests.filter((r) => r.status === 'open');
+  return {
+    total: requests.length,
+    weeks,
+    endState: {
+      open: open.length,
+      overdueAtStart: open.filter((r) => replyDueAt(r.created_at) <= anchorDate).length,
+      oldestOpenDay: open.length ? Math.min(...open.map((r) => dayOf(Date.parse(r.created_at)))) : null,
+    },
+    // what the daily check will log on the first days after the start date if nobody answers
+    projectedWarningsPerDay: [1, 2, 3, 4, 5, 6, 7].map((d) => {
+      const at = new Date(sim.anchorMs + (d - 1) * DAY_MS + BACKLOG_JOB.hourUtc * 3_600_000);
+      return open.filter((r) => replyDueAt(r.created_at) <= at).length;
+    }),
   };
 }
 

@@ -19,13 +19,61 @@
     }
   ],
   "parameters": {
-    "population": { "regular": 195, "lapsing": 145, "rarelyActive": 80 },
+    "population": {
+      "regular": 195,
+      "lapsing": 145,
+      "rarelyActive": 80
+    },
     "lapse": null,
     "cancellations": [
-      { "fromDay": -60, "toDay": -31, "rarelyActive": 17, "stoppedLearning": 0 },
-      { "fromDay": -30, "toDay": -1, "rarelyActive": 17, "stoppedLearning": 0 }
+      {
+        "fromDay": -60,
+        "toDay": -31,
+        "rarelyActive": 17,
+        "stoppedLearning": 0
+      },
+      {
+        "fromDay": -30,
+        "toDay": -1,
+        "rarelyActive": 17,
+        "stoppedLearning": 0
+      }
     ],
     "slowdown": null,
-    "outage": null
+    "outage": null,
+    "carts": {
+      "addPerLessonSession": 0.01,
+      "addPerBrowseSession": 0.03,
+      "secondItemShare": 0.2,
+      "purchaseShare": 0.85,
+      "revisitShare": 0.15,
+      "removeShare": 0.05,
+      "change": null,
+      "personaCart": false
+    },
+    "support": {
+      "perWeekBefore": 3,
+      "perWeekAfter": 3,
+      "rise": null,
+      "topicsBefore": {
+        "billing": 3,
+        "certificate": 2,
+        "account": 3,
+        "course_content": 3,
+        "other": 1
+      },
+      "topicsAfter": {
+        "billing": 3,
+        "certificate": 2,
+        "account": 3,
+        "course_content": 3,
+        "other": 1
+      },
+      "replyMedianHoursBefore": 3,
+      "replyMedianHoursAfter": 3,
+      "slowdown": null,
+      "replySpread": 0.6,
+      "personaQuestion": false
+    }
   }
 }

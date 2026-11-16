@@ -1,0 +1,84 @@
+{
+  "id": "abandoned-carts",
+  "title": "Learners stop completing their purchases",
+  "description": "Learners keep finishing courses and putting the next one in their cart at the same pace as before. But from about six weeks before the start date, over ten days, a growing number of them stop at the checkout: the courses stay in the cart and they go back over lessons they already have instead of starting something new. The application stays fast and healthy.",
+  "expected_finding": "About 45% fewer people complete an enrolment (the 'enrol' step of the checkout) while just as many as before put courses in their cart. The agent reports it as fewer returning users on part of the catalog and purchase capability, says the application was healthy, and can propose an AI agent that reminds the roughly 145 learners with courses waiting in their cart.",
+  "status": "verified",
+  "verified_against": [
+    {
+      "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (detectActorInactivity, actorDropVerdict) and constants.js (ACTOR_INACTIVITY_DROP_PCT, MIN_INACTIVITY_ACTORS, MIN_ACTOR_WINDOW_DAYS, MAX_ACTOR_WINDOW_LENGTH_RATIO, MIN_TREND_DAYS)",
+      "threshold": "distinct client IPs (the CloudFront actor key, a keyed hash of c-ip) on POST /api/courses/{courseId}/enrol fall from about 315 (days -59..-30) to about 170 (days -29..0): a drop of about 46% (41-47% for start dates on all seven weekdays), above ACTOR_INACTIVITY_DROP_PCT = 33, with at least MIN_INACTIVITY_ACTORS = 200 in the earlier window; both windows are 30 days (MIN_ACTOR_WINDOW_DAYS = 7, length ratio 1.0 <= 1.5) and every day is observed. The routes every visitor touches stay flat (GET /api/me/cart, read at every sign-in: about 410 -> 395, -4%; GET /api/courses likewise), so the capability-level max does not move and the route-level fallback reports the enrol route as the part of the capability people stopped using; POST /api/me/cart/items stays flat (about 320 -> 310, -4%)"
+    },
+    {
+      "file": "packages/modules/new-evolution-opportunity/drift/explanations.js (evaluateIncident) and decompose.js (trendOf)",
+      "threshold": "server errors stay below 0.3% per route per day (INCIDENT_ERROR_RATE_PCT = 5), so an outage is ruled out, not confirmed; the change is spread over days -40..-30 across several releases (no single release coincides with it). Learners keep opening lessons (distinct users on the lesson routes move less than 1%, learning requests less than 5%: TREND_FLAT_PCT = 10); learners with nothing new to start record progress and take quizzes less often (distinct users on /api/lessons/{lessonId}/progress and /quiz about -15%), well under ACTOR_INACTIVITY_DROP_PCT = 33, so no learning finding competes with the purchase one"
+    },
+    {
+      "file": "packages/modules/new-evolution-opportunity/approach/eligibility.js",
+      "threshold": "NBF-USAGE-ACTOR_INACTIVITY is an 'agentic_candidate' (inactivity_churn), so the solution architect may propose an AI agent; data/seed/carts.json holds about 145 learners with courses waiting in their cart (real course ids, added_at dates), and the agent can read the cart through GET /api/me/cart's store domain 'carts'"
+    }
+  ],
+  "parameters": {
+    "population": {
+      "regular": 195,
+      "lapsing": 145,
+      "rarelyActive": 80
+    },
+    "lapse": null,
+    "cancellations": [
+      {
+        "fromDay": -60,
+        "toDay": -31,
+        "rarelyActive": 17,
+        "stoppedLearning": 0
+      },
+      {
+        "fromDay": -30,
+        "toDay": -1,
+        "rarelyActive": 17,
+        "stoppedLearning": 0
+      }
+    ],
+    "slowdown": null,
+    "outage": null,
+    "carts": {
+      "addPerLessonSession": 0.01,
+      "addPerBrowseSession": 0.03,
+      "secondItemShare": 0.2,
+      "purchaseShare": 0.85,
+      "revisitShare": 0.15,
+      "removeShare": 0.05,
+      "change": {
+        "fromDay": -40,
+        "toDay": -30,
+        "abandonShare": 0.4,
+        "abandonerAddShare": 0.35
+      },
+      "personaCart": true
+    },
+    "support": {
+      "perWeekBefore": 3,
+      "perWeekAfter": 3,
+      "rise": null,
+      "topicsBefore": {
+        "billing": 3,
+        "certificate": 2,
+        "account": 3,
+        "course_content": 3,
+        "other": 1
+      },
+      "topicsAfter": {
+        "billing": 3,
+        "certificate": 2,
+        "account": 3,
+        "course_content": 3,
+        "other": 1
+      },
+      "replyMedianHoursBefore": 3,
+      "replyMedianHoursAfter": 3,
+      "slowdown": null,
+      "replySpread": 0.6,
+      "personaQuestion": false
+    }
+  }
+}

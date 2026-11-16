@@ -128,7 +128,56 @@ export function computeStats(sim, logs) {
     daily: dailySeries(sim, api, dayOf, learnerIds),
     carts: cartView(sim, api, dayOf),
     support: supportView(sim, dayOf),
+    capabilities: capabilityView(api, dayOf),
   };
+}
+
+// The Governance Agent's ACTOR_INACTIVITY bars (drift/constants.js): a drop of at least
+// ACTOR_INACTIVITY_DROP_PCT in distinct users between the two windows, with at least
+// MIN_INACTIVITY_ACTORS in the earlier one.
+export const INACTIVITY_BARS = Object.freeze({ dropPct: 33, minEarlierActors: 200 });
+
+/**
+ * Per LearnLoop service (one service directory = one code component, which is what
+ * the agent's declared_in_code route rule maps a route to, and so one capability):
+ * distinct client IPs per route (method-agnostic) in each detector window, the
+ * service-level max across its routes (the capability-level count), its server-error
+ * share, and the routes that cross the inactivity bars, ordered the way
+ * detectActorInactivity names them (earlier actors, then route).
+ */
+function capabilityView(api, dayOf) {
+  const windows = { earlier: [-59, -30], recent: [-29, -1] };
+  const byService = new Map();
+  for (const r of api) {
+    const d = dayOf(r.ts);
+    const w = d >= windows.earlier[0] && d <= windows.earlier[1] ? 'earlier' : d >= windows.recent[0] && d <= windows.recent[1] ? 'recent' : null;
+    if (!w) continue;
+    if (!byService.has(r.service)) byService.set(r.service, { routes: new Map(), earlier: { requests: 0, errors: 0 }, recent: { requests: 0, errors: 0 } });
+    const svc = byService.get(r.service);
+    svc[w].requests += 1;
+    if (r.status >= 500) svc[w].errors += 1;
+    if (!svc.routes.has(r.route)) svc.routes.set(r.route, { earlier: new Set(), recent: new Set() });
+    svc.routes.get(r.route)[w].add(r.ip);
+  }
+  const drop = (a, b) => (a ? Math.round(((a - b) / a) * 1000) / 10 : null);
+  const out = {};
+  for (const [service, svc] of [...byService.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const routes = Object.fromEntries([...svc.routes.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([route, w]) => [route, {
+      earlier: w.earlier.size, recent: w.recent.size, dropPct: drop(w.earlier.size, w.recent.size),
+    }]));
+    const max = (w) => Math.max(0, ...Object.values(routes).map((r) => r[w]));
+    const inactiveRoutes = Object.entries(routes)
+      .filter(([, r]) => r.earlier >= INACTIVITY_BARS.minEarlierActors && r.dropPct >= INACTIVITY_BARS.dropPct)
+      .sort((a, b) => (b[1].earlier - a[1].earlier) || a[0].localeCompare(b[0]))
+      .map(([route]) => route);
+    out[service] = {
+      routes,
+      serviceMax: { earlier: max('earlier'), recent: max('recent'), dropPct: drop(max('earlier'), max('recent')) },
+      serverErrorPct: Object.fromEntries(['earlier', 'recent'].map((w) => [w, svc[w].requests ? Math.round((svc[w].errors / svc[w].requests) * 10_000) / 100 : 0])),
+      inactiveRoutes,
+    };
+  }
+  return out;
 }
 
 /** Enrolment and cart routes, the support routes: what a route-level distinct-actor window counts. */
@@ -211,13 +260,27 @@ function supportView(sim, dayOf) {
   }
   const anchorDate = new Date(sim.anchorMs);
   const open = requests.filter((r) => r.status === 'open');
+  const helpLearners = (from, to) => new Set(sim.requests.filter((q) => q.route === '/api/me/support-requests' && q.userId
+    && dayOf(q.ts) >= from && dayOf(q.ts) <= to).map((q) => q.userId)).size;
+  const answeredIn = (from, to) => requests.filter((r) => { const d = dayOf(Date.parse(r.created_at)); return d >= from && d <= to; });
+  const windowView = (from, to) => {
+    const asked = answeredIn(from, to);
+    return {
+      helpLearners: helpLearners(from, to),
+      asked: asked.length,
+      answeredWithinTarget: asked.filter((r) => r.answered_at && Date.parse(r.answered_at) <= replyDueAt(r.created_at).getTime()).length,
+      medianReplyHours: median(asked.filter((r) => r.answered_at).map((r) => (Date.parse(r.answered_at) - Date.parse(r.created_at)) / 3_600_000)),
+    };
+  };
   return {
     total: requests.length,
+    windows: { earlier: windowView(-59, -30), recent: windowView(-29, -1) },
     weeks,
     endState: {
       open: open.length,
       overdueAtStart: open.filter((r) => replyDueAt(r.created_at) <= anchorDate).length,
       oldestOpenDay: open.length ? Math.min(...open.map((r) => dayOf(Date.parse(r.created_at)))) : null,
+      openTopics: open.reduce((acc, r) => ({ ...acc, [r.topic]: (acc[r.topic] ?? 0) + 1 }), {}),
     },
   };
 }

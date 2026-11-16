@@ -3,9 +3,9 @@
 // designed for in the numbers the Governance Agent's detectors compare.
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generate } from '../src/generate.js';
+import { computeStats, generate, INACTIVITY_BARS } from '../src/generate.js';
 import { completionPercent } from '../src/contract/progress.js';
-import { DAY_MS, PERSONAS } from '../src/model.js';
+import { DAY_MS, HELP_PERSONA, PERSONAS, simulate } from '../src/model.js';
 import {
   canonicalJson, getScenario, loadScenarios, plainParameters, publicCard, scenarioFingerprint, validateScenario,
 } from '../src/scenarios.js';
@@ -23,7 +23,7 @@ before(() => {
 });
 
 test('scenario files: valid, one per id, verified or experimental with reasons', () => {
-  assert.deepEqual(scenarioIds.sort(), ['abandoned-carts', 'lapsed-learners', 'outage-drop', 'slow-lessons', 'steady-state']);
+  assert.deepEqual(scenarioIds.sort(), ['abandoned-carts', 'lapsed-learners', 'outage-drop', 'q4-three-signals', 'slow-lessons', 'steady-state']);
   for (const def of loadScenarios().values()) {
     assert.ok(def.title && def.description && def.expected_finding);
     if (def.status === 'verified') assert.ok(def.verified_against.every((v) => v.file && v.threshold));
@@ -44,6 +44,17 @@ test('scenario files: valid, one per id, verified or experimental with reasons',
   assert.throws(() => validateScenario({ ...support, parameters: { ...support.parameters, support: { ...support.parameters.support, perWeekAfter: 24 } } }), /perWeekAfter differs/);
   assert.throws(() => validateScenario({ ...support, parameters: { ...support.parameters, support: { ...support.parameters.support, topicsAfter: { refunds: 1 } } } }), /topics/);
   assert.equal(getScenario('lapsed-learners').parameters.carts, undefined, 'lapsed-learners predates carts and support and keeps its definition (and fingerprint)');
+  const three = getScenario('q4-three-signals');
+  const help = three.parameters.support.help;
+  const withHelp = (h) => ({ ...three, parameters: { ...three.parameters, support: { ...three.parameters.support, help: h } } });
+  assert.throws(() => validateScenario(withHelp({ ...help, visitShare: 1.5 })), /support.help.visitShare/);
+  assert.throws(() => validateScenario(withHelp({ ...help, giveUp: { ...help.giveUp, share: 2 } })), /support.help.giveUp/);
+  assert.throws(() => validateScenario(withHelp({ ...help, extra: 1 })), /unknown support.help parameters: extra/);
+  assert.throws(() => validateScenario({ ...three, parameters: { ...three.parameters, lapse: null, cancellations: carts.parameters.cancellations } }), /lapsedAddPerBrowseSession needs a lapse/);
+  for (const id of ['abandoned-carts', 'steady-state', 'slow-lessons', 'outage-drop']) {
+    assert.equal(getScenario(id).parameters.support.help, undefined, `${id} keeps its definition (no Help visits)`);
+    assert.equal(getScenario(id).parameters.carts.lapsedAddPerBrowseSession, undefined, `${id} keeps its definition`);
+  }
 });
 
 test('fingerprint: canonical, stable, and sensitive to the definition, the seed and the anchor', () => {
@@ -242,4 +253,88 @@ test('abandoned-carts: the enrol route loses about 45% of its people while cart 
   const titles = new Map(r.data.courses.map((c) => [c.id, c.title]));
   assert.deepEqual(marco.items.map((i) => titles.get(i.course_id)), ['Python for Data Work', 'Data Visualization Fundamentals']);
   assert.deepEqual(marco.items.map((i) => Math.floor((Date.parse(i.added_at) - r.sim.anchorMs) / DAY_MS)), [-16, -9]);
+});
+
+// q4-three-signals: three drops, each in the routes of a different LearnLoop service (one
+// service directory = one code component = one capability for the agent's route mapping),
+// checked for start dates on all seven weekdays. The detector names a capability's
+// qualifying route with the most earlier users, so each service must have exactly the
+// intended routes over the bars and everything else in it well under them.
+const WEEK_OF_ANCHORS = ['2026-11-15', '2026-11-16', '2026-11-17', '2026-11-18', '2026-11-19', '2026-11-20', '2026-11-21'];
+const LESSON_ROUTE_SET = new Set(['/api/lessons/{lessonId}', '/api/courses/{courseId}/lessons', '/api/lessons/{lessonId}/progress', '/api/lessons/{lessonId}/quiz']);
+
+test('q4-three-signals: lessons, enrolment and Help each lose about half of their people, in three different services, on all seven start weekdays', () => {
+  const def = getScenario('q4-three-signals');
+  for (const anchor of WEEK_OF_ANCHORS) {
+    const s = anchor === ANCHOR ? dv('q4-three-signals') : computeStats(simulate({ anchor, seed: 42, scenario: def }), { cloudfront: new Map(), appLogs: new Map() });
+    const c = s.capabilities;
+    const route = (svc, r) => c[svc].routes[r];
+    // 1. learning: the lesson routes, not the dashboard read every visitor makes
+    assert.ok(c.learning.inactiveRoutes.length >= 3, `${anchor}: learning ${c.learning.inactiveRoutes}`);
+    for (const r of c.learning.inactiveRoutes) assert.ok(LESSON_ROUTE_SET.has(r), `${anchor}: ${r} is a lesson route`);
+    for (const r of ['/api/lessons/{lessonId}', '/api/lessons/{lessonId}/progress']) {
+      assert.ok(route('learning', r).earlier >= 300 && route('learning', r).dropPct >= 38, `${anchor}: ${r} ${JSON.stringify(route('learning', r))}`);
+    }
+    // 2. catalog: the enrol route alone; the cart routes stay flat
+    const enrol = route('catalog', '/api/courses/{courseId}/enrol');
+    assert.deepEqual(c.catalog.inactiveRoutes, ['/api/courses/{courseId}/enrol'], `${anchor}: catalog`);
+    assert.ok(enrol.earlier >= 280 && enrol.dropPct >= 40, `${anchor}: enrol ${JSON.stringify(enrol)}`);
+    assert.ok(route('catalog', '/api/me/cart/items').dropPct < 25, `${anchor}: cart adds ${route('catalog', '/api/me/cart/items').dropPct}`);
+    for (const r of ['/api/me/cart', '/api/courses', '/api/courses/{courseId}']) assert.ok(Math.abs(route('catalog', r).dropPct) < 10, `${anchor}: ${r}`);
+    // 3. notifications: the Help route alone; the bell and the inbox stay flat
+    const help = route('notifications', '/api/me/support-requests');
+    assert.deepEqual(c.notifications.inactiveRoutes, ['/api/me/support-requests'], `${anchor}: notifications`);
+    assert.ok(help.earlier >= 270 && help.dropPct >= 40, `${anchor}: Help ${JSON.stringify(help)}`);
+    for (const r of ['/api/me/notifications/unread-count', '/api/me/notifications', '/api/me/notifications/{notificationId}/read']) {
+      assert.ok(route('notifications', r).dropPct < 20, `${anchor}: ${r} ${route('notifications', r).dropPct}`);
+    }
+    // the capability-level max hides each drop (the route-level fallback names it), and
+    // nothing else crosses the bars: billing, identity, and admin (one office address)
+    for (const svc of ['learning', 'catalog', 'notifications']) assert.ok(c[svc].serviceMax.dropPct < 10, `${anchor}: ${svc} max ${c[svc].serviceMax.dropPct}`);
+    for (const svc of ['admin', 'billing', 'identity']) assert.deepEqual(c[svc].inactiveRoutes, [], `${anchor}: ${svc}`);
+    assert.ok(Math.max(...Object.values(c.admin.routes).map((r) => r.earlier)) < INACTIVITY_BARS.minEarlierActors, `${anchor}: staff are a handful of people`);
+    // healthy: no incident for the drift engine to confirm
+    for (const svc of Object.values(c)) for (const pct of Object.values(svc.serverErrorPct)) assert.ok(pct < 0.5, `${anchor}: server errors ${pct}%`); // INCIDENT_ERROR_RATE_PCT = 5
+    assert.ok(s.health.worst5xxShare < 0.005, `${anchor}: worst route-day ${s.health.worst5xxShare}`);
+    assert.ok(s.health.lessonsP95.max < 200 && s.health.otherP95.max < 100, `${anchor}: latency flat`);
+    // the end state the three AI agents would work from
+    assert.ok(s.carts.endState.learnersWithItems >= 120 && s.carts.endState.learnersWithItems <= 175, `${anchor}: ${s.carts.endState.learnersWithItems} learners with a waiting cart`);
+    const { open, overdueAtStart, openTopics } = s.support.endState;
+    assert.ok(open >= 15 && overdueAtStart >= open - 3, `${anchor}: ${open} open questions, ${overdueAtStart} overdue`);
+    const repetitive = (openTopics.certificate ?? 0) + (openTopics.billing ?? 0) + (openTopics.account ?? 0);
+    assert.ok(repetitive / open >= 0.85, `${anchor}: open questions are about the same few topics ${JSON.stringify(openTopics)}`);
+    const { earlier, recent } = s.support.windows;
+    assert.ok(earlier.answeredWithinTarget / earlier.asked >= 0.5 && recent.answeredWithinTarget <= 2, `${anchor}: answers slow down (${earlier.answeredWithinTarget}/${earlier.asked} -> ${recent.answeredWithinTarget}/${recent.asked})`);
+    assert.ok(earlier.medianReplyHours < 36 && recent.medianReplyHours > 24 * 7, `${anchor}: reply ${earlier.medianReplyHours} h -> ${recent.medianReplyHours} h`);
+  }
+});
+
+test('q4-three-signals: personas (Ana lapsed, Marco with a waiting cart, Lena with an unanswered question, Sofia with an open queue)', () => {
+  const r = results.get('q4-three-signals');
+  const { users, carts, support_requests: support, courses } = r.data;
+  const day = (iso) => Math.floor((Date.parse(iso) - r.sim.anchorMs) / DAY_MS);
+  const lena = users.find((u) => u.id === HELP_PERSONA.id);
+  assert.deepEqual([lena.email, lena.name, lena.role], [HELP_PERSONA.email, HELP_PERSONA.name, 'learner']);
+  const staffIds = new Set(users.filter((u) => u.role === 'staff').map((u) => u.id));
+  const [invoice, certificate, ...more] = support.filter((q) => q.user_id === lena.id);
+  assert.equal(more.length, 0);
+  assert.deepEqual([invoice.topic, day(invoice.created_at), invoice.status], ['billing', -50, 'answered']);
+  assert.ok(staffIds.has(invoice.replies[0].staff_id));
+  assert.ok(Date.parse(invoice.answered_at) - Date.parse(invoice.created_at) < 3 * DAY_MS, 'her first question was answered promptly');
+  assert.deepEqual([certificate.topic, day(certificate.created_at), certificate.status, certificate.replies.length], ['certificate', -12, 'open', 0]);
+  const checks = r.sim.requests.filter((q) => q.userId === lena.id && q.method === 'GET' && q.route === '/api/me/support-requests').map((q) => Math.floor((q.ts - r.sim.anchorMs) / DAY_MS));
+  for (const d of [-9, -5, -2]) assert.ok(checks.includes(d), `Lena checks Help on day ${d}`);
+  assert.ok(!carts.some((c) => c.user_id === lena.id || c.user_id === PERSONAS.ana.id));
+  assert.ok(!support.some((q) => q.user_id === PERSONAS.ana.id), 'Ana keeps only her lapsed-learner script');
+  const titles = new Map(courses.map((c) => [c.id, c.title]));
+  assert.deepEqual(carts.find((c) => c.user_id === PERSONAS.marco.id).items.map((i) => titles.get(i.course_id)), ['Python for Data Work', 'Data Visualization Fundamentals']);
+  const sofiaReplies = support.flatMap((q) => q.replies).filter((x) => x.staff_id === PERSONAS.sofia.id).length;
+  assert.ok(sofiaReplies >= support.flatMap((q) => q.replies).length / 3, 'Sofia answers the largest share of questions');
+  assert.ok(support.filter((q) => q.status === 'open').length >= 15, 'Sofia finds an open queue in Admin');
+  // staff look at the queue and reply far less in the recent window
+  const staff = r.sim.requests.filter((q) => q.kind === 'api' && staffIds.has(q.userId));
+  const count = (rt, from, to) => staff.filter((q) => q.route === rt && day(new Date(q.ts).toISOString()) >= from && day(new Date(q.ts).toISOString()) <= to).length;
+  const reply = '/api/admin/support-requests/{requestId}/reply';
+  assert.ok(count(reply, -29, -1) < count(reply, -59, -30) / 2, 'fewer replies');
+  assert.ok(count('/api/admin/support-requests', -29, -1) < count('/api/admin/support-requests', -59, -30) * 0.75, 'the queue is opened less');
 });

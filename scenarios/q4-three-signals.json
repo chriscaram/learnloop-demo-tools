@@ -1,0 +1,120 @@
+{
+  "id": "q4-three-signals",
+  "title": "A quarter where three things slip at once",
+  "description": "Over the same few weeks, about six weeks before the start date, three things change. A third of the paying learners stop opening lessons but keep signing in. Learners keep putting their next course in the cart, yet far fewer complete the checkout. And the three-person team answers learner questions more and more slowly, until half of the learners stop coming back to the Help page. The application stays fast and healthy throughout.",
+  "expected_finding": "Three separate findings, each about fewer returning users on part of a different capability, each saying the application was healthy over the period. About 40% fewer learners open lessons in 'Course delivery and learner progress' (an AI agent could bring inactive learners back with a lesson reminder). About half as many learners complete the enrolment step of the checkout in the catalog and purchase capability, while nearly as many as before put courses in their cart (an AI agent could remind the roughly 145 learners whose courses wait in their cart). And about half as many learners come back to the Help page, in the capability that holds the learner notifications and Help (an AI agent could draft answers to the repetitive open questions for the staff to check and send).",
+  "status": "verified",
+  "verified_against": [
+    {
+      "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (detectActorInactivity, actorDropVerdict) and constants.js (ACTOR_INACTIVITY_DROP_PCT = 33, MIN_INACTIVITY_ACTORS = 200, MIN_ACTOR_WINDOW_DAYS = 7, MAX_ACTOR_WINDOW_LENGTH_RATIO = 1.5, MIN_TREND_DAYS = 14)",
+      "threshold": "Learning (services/learning, the capability that holds the lesson routes): distinct client IPs on GET /api/lessons/{lessonId} and GET /api/courses/{courseId}/lessons fall 334 -> 193 (-42.2%) and on POST /api/lessons/{lessonId}/progress 334 -> 181..184 (-44.9..-45.8%), for start dates on all seven weekdays (days -59..-30 against -29..0). The capability-level max (GET /api/me/progress, read at every sign-in, about 410 -> 394) moves 3.7..4.4%, so the route-level fallback reports the lesson routes. Both windows are 30 days and every day is observed."
+    },
+    {
+      "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (detectActorInactivity: the route-level fallback names the qualifying route with the most earlier users)",
+      "threshold": "Catalog (services/catalog: cart and enrolment): distinct client IPs on POST /api/courses/{courseId}/enrol fall from 298..311 to 145..160 (-46.3..-52.9% on all seven start weekdays). The only other catalog route that moves is POST /api/me/cart/items (about 318 -> 290, -2.9..-15.3%), under the 33% bar, so the enrol route is the one named; GET /api/me/cart, GET /api/courses and GET /api/courses/{courseId} move under 5% (capability-level max -3.7..-4.4%). Learners who stopped opening lessons keep saving courses in the cart, which is why cart adds stay flat while lessons fall. data/seed/carts.json holds 140..155 learners with courses waiting in their cart."
+    },
+    {
+      "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (detectActorInactivity, route-level fallback); packages/platform/telemetry/routes.js (declared_in_code)",
+      "threshold": "Notifications (services/notifications, which also declares the learner Help routes): distinct client IPs on /api/me/support-requests (GET to read their questions and answers, POST to ask) fall from 290..307 to 148..155 (-46.6..-50.3% on all seven start weekdays). GET /api/me/notifications/unread-count (every sign-in, the capability-level max) moves 3.7..4.4%, GET /api/me/notifications 8.2..11.3% and POST /api/me/notifications/{notificationId}/read 7.4..12.3%, so the Help route is the one named. The staff side (GET /api/admin/support-requests and the reply route, declared in services/admin) comes from one office address, far under MIN_INACTIVITY_ACTORS, so it raises nothing on its own; staff open the queue about half as often and send about a third as many replies. data/seed/support_requests.json ends with 22..38 open questions, 94-100% of them about certificates, billing or the account, and the earlier answers carry real staff ids."
+    },
+    {
+      "file": "packages/modules/new-evolution-opportunity/drift/explanations.js (evaluateIncident, evaluateDataQuality; SUPPRESSING_CAUSES in constants.js)",
+      "threshold": "server errors stay at or below 0.05% per capability per window (under 0.4% on the worst route-day), far under INCIDENT_ERROR_RATE_PCT = 5, with no client errors on these routes and p95 about 105-131 ms on lesson routes and 55-63 ms elsewhere, unchanged at the drops, so incident_or_outage is ruled out, not confirmed; every hour of the 60 days has logs, so data_quality has no gap to confirm; the three changes are spread over days -45..-30 across several releases. None of the three is withdrawn."
+    },
+    {
+      "file": "packages/modules/new-evolution-opportunity/approach/eligibility.js",
+      "threshold": "NBF-USAGE-ACTOR_INACTIVITY is an 'agentic_candidate' (inactivity_churn), so for each of the three the solution architect may propose an AI agent: a lesson reminder (progress.json: last_activity_at of the learners who stopped), a cart reminder (carts.json), and replies drafted for staff to approve (support_requests.json: the open questions, and the earlier answers to the same questions)."
+    }
+  ],
+  "parameters": {
+    "population": {
+      "regular": 195,
+      "lapsing": 145,
+      "rarelyActive": 80
+    },
+    "lapse": {
+      "lastLessonFromDay": -45,
+      "lastLessonToDay": -31
+    },
+    "cancellations": [
+      {
+        "fromDay": -60,
+        "toDay": -31,
+        "rarelyActive": 17,
+        "stoppedLearning": 0
+      },
+      {
+        "fromDay": -30,
+        "toDay": -15,
+        "rarelyActive": 7,
+        "stoppedLearning": 8
+      },
+      {
+        "fromDay": -14,
+        "toDay": -1,
+        "rarelyActive": 4,
+        "stoppedLearning": 18
+      }
+    ],
+    "slowdown": null,
+    "outage": null,
+    "carts": {
+      "addPerLessonSession": 0.01,
+      "addPerBrowseSession": 0.03,
+      "secondItemShare": 0.2,
+      "purchaseShare": 0.85,
+      "revisitShare": 0.15,
+      "removeShare": 0.05,
+      "change": {
+        "fromDay": -40,
+        "toDay": -30,
+        "abandonShare": 0.12,
+        "abandonerAddShare": 0.35
+      },
+      "personaCart": true,
+      "lapsedAddPerBrowseSession": 0.15
+    },
+    "support": {
+      "perWeekBefore": 25,
+      "perWeekAfter": 12,
+      "rise": {
+        "fromDay": -40,
+        "toDay": -28
+      },
+      "topicsBefore": {
+        "certificate": 9,
+        "billing": 5,
+        "account": 4,
+        "course_content": 1,
+        "other": 0.5
+      },
+      "topicsAfter": {
+        "certificate": 9,
+        "billing": 5,
+        "account": 4,
+        "course_content": 1,
+        "other": 0.5
+      },
+      "replyMedianHoursBefore": 3,
+      "replyMedianHoursAfter": 480,
+      "slowdown": {
+        "fromDay": -40,
+        "toDay": -30
+      },
+      "replySpread": 0.6,
+      "personaQuestion": false,
+      "help": {
+        "visitShare": 0.12,
+        "checkShare": 0.6,
+        "giveUpAfterHours": 48,
+        "visitShareGivenUp": 0.005,
+        "giveUp": {
+          "fromDay": -40,
+          "toDay": -30,
+          "share": 0.57
+        },
+        "persona": true
+      }
+    }
+  }
+}

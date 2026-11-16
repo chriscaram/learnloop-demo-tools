@@ -74,6 +74,7 @@ export function validateScenario(def) {
     if (!isInt(o.retriesMin) || !isInt(o.retriesMax) || o.retriesMin < 0 || o.retriesMax < o.retriesMin || o.retriesMax > 5) fail(id, 'outage retries are 0..5');
   }
   validateCarts(id, p.carts ?? null);
+  if (p.carts?.lapsedAddPerBrowseSession !== undefined && p.lapse === null) fail(id, 'carts.lapsedAddPerBrowseSession needs a lapse');
   validateSupport(id, p.support ?? null);
   // carts and support are optional: a scenario written before they existed has neither
   const known = ['population', 'lapse', 'cancellations', 'slowdown', 'outage', 'carts', 'support'];
@@ -86,7 +87,8 @@ const isShare = (v) => typeof v === 'number' && v >= 0 && v <= 1;
 const isSpan = (s) => s && inWindow(s.fromDay) && inWindow(s.toDay) && s.fromDay <= s.toDay;
 const TOPICS = ['billing', 'certificate', 'account', 'course_content', 'other'];
 
-const CART_KEYS = ['addPerLessonSession', 'addPerBrowseSession', 'secondItemShare', 'purchaseShare', 'revisitShare', 'removeShare', 'change', 'personaCart'];
+// lapsedAddPerBrowseSession is optional: a scenario written before it existed has none
+const CART_KEYS = ['addPerLessonSession', 'addPerBrowseSession', 'secondItemShare', 'purchaseShare', 'revisitShare', 'removeShare', 'change', 'personaCart', 'lapsedAddPerBrowseSession'];
 
 function validateCarts(id, c) {
   if (c === null) return;
@@ -101,6 +103,7 @@ function validateCarts(id, c) {
     if (extraChange.length) fail(id, `unknown carts.change parameters: ${extraChange.join(', ')}`);
   }
   if (typeof c.personaCart !== 'boolean') fail(id, 'carts.personaCart is true or false');
+  if (c.lapsedAddPerBrowseSession !== undefined && !isShare(c.lapsedAddPerBrowseSession)) fail(id, 'carts.lapsedAddPerBrowseSession is a share between 0 and 1');
   const extra = Object.keys(c).filter((k) => !CART_KEYS.includes(k));
   if (extra.length) fail(id, `unknown carts parameters: ${extra.join(', ')}`);
 }
@@ -122,8 +125,27 @@ function validateSupport(id, s) {
     }
   }
   if (typeof s.personaQuestion !== 'boolean') fail(id, 'support.personaQuestion is true or false');
-  const extra = Object.keys(s).filter((k) => !['perWeekBefore', 'perWeekAfter', 'rise', 'topicsBefore', 'topicsAfter', 'replyMedianHoursBefore', 'replyMedianHoursAfter', 'slowdown', 'replySpread', 'personaQuestion'].includes(k));
+  validateHelp(id, s.help);
+  const extra = Object.keys(s).filter((k) => !['perWeekBefore', 'perWeekAfter', 'rise', 'topicsBefore', 'topicsAfter', 'replyMedianHoursBefore', 'replyMedianHoursAfter', 'slowdown', 'replySpread', 'personaQuestion', 'help'].includes(k));
   if (extra.length) fail(id, `unknown support parameters: ${extra.join(', ')}`);
+}
+
+// support.help is optional (a scenario written before it existed has none).
+const HELP_KEYS = ['visitShare', 'checkShare', 'giveUpAfterHours', 'visitShareGivenUp', 'giveUp', 'persona'];
+function validateHelp(id, h) {
+  if (h === undefined) return;
+  if (!h || typeof h !== 'object') fail(id, 'support.help must be an object when present');
+  for (const k of ['visitShare', 'checkShare', 'visitShareGivenUp']) if (!isShare(h[k])) fail(id, `support.help.${k} is a share between 0 and 1`);
+  if (!(typeof h.giveUpAfterHours === 'number' && h.giveUpAfterHours > 0 && h.giveUpAfterHours <= 24 * 30)) fail(id, 'support.help.giveUpAfterHours is 0..720 hours');
+  if (h.giveUp !== null) {
+    const g = h.giveUp ?? {};
+    if (!isSpan(g) || !isShare(g.share)) fail(id, 'support.help.giveUp needs fromDay <= toDay inside -60..-1 and a share, or is null');
+    const extraGiveUp = Object.keys(g).filter((k) => !['fromDay', 'toDay', 'share'].includes(k));
+    if (extraGiveUp.length) fail(id, `unknown support.help.giveUp parameters: ${extraGiveUp.join(', ')}`);
+  }
+  if (typeof h.persona !== 'boolean') fail(id, 'support.help.persona is true or false');
+  const extra = Object.keys(h).filter((k) => !HELP_KEYS.includes(k));
+  if (extra.length) fail(id, `unknown support.help parameters: ${extra.join(', ')}`);
 }
 
 /** Every scenario under scenarios/, validated, keyed by id, in file-name order. */
@@ -202,7 +224,7 @@ export function plainParameters(def) {
   return lines;
 }
 
-const pct = (v) => `${Math.round(v * 100)}%`;
+const pct = (v) => (v > 0 && v < 0.01 ? `${Math.round(v * 1000) / 10}%` : `${Math.round(v * 100)}%`);
 const hours = (h) => (h < 48 ? `${Math.round(h)} hours` : `${(h / 24).toFixed(1).replace(/\.0$/, '')} days`);
 const topicWords = (t) => {
   const total = Object.values(t).reduce((a, b) => a + b, 0);
@@ -217,6 +239,9 @@ function plainCarts(c) {
   if (c.change) {
     lines.push(`${pct(c.change.abandonShare)} of the learners stop completing the checkout, each from a day ${span(c.change.fromDay, c.change.toDay)}, spread evenly. They keep putting courses in the cart (when they need a new course and already have one waiting, they add another in ${pct(c.change.abandonerAddShare)} of those visits) and keep opening the lessons of courses they already have.`);
   }
+  if (c.lapsedAddPerBrowseSession !== undefined) {
+    lines.push(`Learners who have stopped opening lessons keep looking around and put a course in their cart in ${pct(c.lapsedAddPerBrowseSession)} of their visits, but never complete the checkout.`);
+  }
   if (c.personaCart) lines.push('Marco Bellini (marco.bellini@example.com) puts Python for Data Work in his cart 16 days before the start date and Data Visualization Fundamentals 9 days before, opens the checkout page and leaves without completing it.');
   return lines;
 }
@@ -225,12 +250,17 @@ function plainSupport(s) {
   if (!s) return ['No questions are sent to the support team.'];
   const lines = [];
   lines.push(s.rise
-    ? `Learners ask the team about ${s.perWeekBefore} questions a week until ${-s.rise.fromDay} days before the start date, rising evenly to about ${s.perWeekAfter} a week by ${-s.rise.toDay} days before (topics before: ${topicWords(s.topicsBefore)}; after: ${topicWords(s.topicsAfter)}).`
+    ? `Learners ask the team about ${s.perWeekBefore} questions a week until ${-s.rise.fromDay} days before the start date, ${s.perWeekAfter > s.perWeekBefore ? 'rising' : 'falling'} evenly to about ${s.perWeekAfter} a week by ${-s.rise.toDay} days before (topics before: ${topicWords(s.topicsBefore)}; after: ${topicWords(s.topicsAfter)}).`
     : `Learners ask the team about ${s.perWeekBefore} questions a week (topics: ${topicWords(s.topicsBefore)}).`);
   lines.push(s.slowdown
     ? `Staff take up a question a median of ${hours(s.replyMedianHoursBefore)} after it is asked (log-normal spread ${s.replySpread}) until ${-s.slowdown.fromDay} days before the start date, slowing evenly to ${hours(s.replyMedianHoursAfter)} by ${-s.slowdown.toDay} days before; the next staff visit after that (weekdays, office hours) answers it, so questions not taken up by the start date stay open.`
     : `Staff take up a question a median of ${hours(s.replyMedianHoursBefore)} after it is asked (log-normal spread ${s.replySpread}); the next staff visit after that (weekdays, office hours) answers it, so most questions are answered the same day or the next morning.`);
-  lines.push('Every morning at 07:00 UTC the admin function checks for open questions waiting longer than one business day and logs one warning for each.');
+  const h = s.help;
+  if (h) {
+    lines.push(`On ${pct(h.visitShare)} of their visits learners also open the Help page to look at their questions. A learner whose own question is still open checks it on ${pct(h.checkShare)} of their visits; one who finds it unanswered after more than ${hours(h.giveUpAfterHours)} gives up on Help: from then on they open it on only ${pct(h.visitShareGivenUp)} of their visits and ask nothing more.`);
+    if (h.giveUp) lines.push(`${pct(h.giveUp.share)} of the learners give up on Help in the same way, each from a day ${span(h.giveUp.fromDay, h.giveUp.toDay)}, spread evenly.`);
+    if (h.persona) lines.push('Lena Hoffmann (lena.hoffmann@example.com), an active learner, asks about an invoice 50 days before the start date and is answered within hours; she asks whether LearnLoop issues certificates of completion 12 days before, checks the Help page 9, 5 and 2 days before, and nobody answers it.');
+  }
   if (s.personaQuestion) lines.push('Ana Moreno (ana.moreno@example.com) asks whether she will get a certificate for Cloud Foundations 5 days before the start date; nobody answers it.');
   return lines;
 }

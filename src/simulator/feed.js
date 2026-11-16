@@ -64,6 +64,10 @@ export function eventSentence(record, request, index) {
     case 'notification_opened': return `A learner opened a notification${device}.`;
     case 'staff_message_sent': return 'A member of staff sent a learner a personal message.';
     case 'feature_flag_changed': return 'A member of staff switched a feature on or off.';
+    case 'cart_item_added': return `A learner put ${index.course(id)} in their cart${device}.`;
+    case 'cart_item_removed': return `A learner took ${index.course(id)} out of their cart${device}.`;
+    case 'support_request_created': return `A learner asked the support team a question${device}.`;
+    case 'support_reply_sent': return 'A member of staff answered a learner\'s question.';
     default: return `The application recorded '${record.event}'.`;
   }
 }
@@ -95,6 +99,12 @@ const ROUTE_PHRASES = Object.freeze({
   '/api/admin/flags': 'open the feature switches',
   '/api/admin/flags/{flagKey}': 'change a feature switch',
   '/api/admin/learners/{userId}/message': 'send a learner a message',
+  '/api/me/cart': "load the learner's cart",
+  '/api/me/cart/items': 'put a course in the cart',
+  '/api/me/cart/items/{courseId}': 'take a course out of the cart',
+  '/api/me/support-requests': 'ask the support team a question or read the answers',
+  '/api/admin/support-requests': "open the staff list of learners' questions",
+  '/api/admin/support-requests/{requestId}/reply': "answer a learner's question",
 });
 
 /** A raw path back to its route template, for the phrase table. */
@@ -102,6 +112,7 @@ export function routeOf(path) {
   return String(path ?? '')
     .replace(/\/usr_[0-9a-f]{12}/, '/{userId}').replace(/\/crs_[0-9a-f]{12}/, '/{courseId}')
     .replace(/\/les_[0-9a-f]{12}/, '/{lessonId}').replace(/\/ntf_[0-9a-f]{12}/, '/{notificationId}')
+    .replace(/\/sup_[0-9a-f]{12}/, '/{requestId}')
     .replace(/^\/api\/admin\/flags\/[a-z_]+$/, '/api/admin/flags/{flagKey}');
 }
 
@@ -137,7 +148,7 @@ export function cloudfrontSentence(line, index) {
 }
 
 const MIN_FAILURES_TO_FEATURE = 5;
-const FEED_PRIORITY = ['subscription_cancelled', 'lesson_started', 'lesson_completed', 'user_signed_in', 'quiz_submitted',
+const FEED_PRIORITY = ['subscription_cancelled', 'lesson_started', 'lesson_completed', 'support_request_created', 'cart_item_added', 'support_reply_sent', 'user_signed_in', 'quiz_submitted',
   'course_enrolled', 'progress_viewed', 'catalog_viewed', 'notification_opened', 'staff_message_sent', 'subscription_renewed'];
 
 /**

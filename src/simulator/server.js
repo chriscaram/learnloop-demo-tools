@@ -9,7 +9,8 @@
 // localhost in its Host header (a page on another site cannot reach it through DNS
 // rebinding). It runs with the operator's own AWS credentials and git setup.
 //
-//   GET  /api/scenarios                       the cards: id, title, description (no parameters)
+//   GET  /api/scenarios                       the cards: id, title, description, expected finding (no parameters)
+//   GET  /api/scenarios/:id/business-review   business-docs/<id>.md, as a download with a neutral file name
 //   GET  /api/fingerprint?scenario=&anchor=   SHA-256 of the sealed definition + seed + anchor
 //   GET  /api/scenarios/:id/reveal?anchor=    the whole definition, in plain words too
 //   GET  /api/state[?readBack=1]              what is loaded now (state/loaded.json) [+ bucket read-back]
@@ -38,6 +39,9 @@ export const MAX_RUNS_KEPT = 20;
 const PAGE_DIR = path.join(TOOLS_ROOT, 'simulator');
 const STATIC = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'] };
 const ANCHOR_RE = /^\d{4}-\d{2}-\d{2}$/;
+export const BUSINESS_DOCS_DIR = path.join(TOOLS_ROOT, 'business-docs');
+/** The download's name never names the scenario: the presenter uploads it to the agent as it is. */
+export const BUSINESS_REVIEW_FILENAME = 'learnloop-q4-2026-business-review.md';
 
 const sendJson = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -53,7 +57,7 @@ function validAnchor(anchor) {
  * Build the request handler. `aws` and `git` are the layers (./layers.js); tests pass
  * fakes. Returns { handler, runner } so a test can await a run.
  */
-export function createSimulator({ aws, git, paths, scenariosDir, now = () => new Date(), port = DEFAULT_PORT, workerUrl }) {
+export function createSimulator({ aws, git, paths, scenariosDir, businessDocsDir = BUSINESS_DOCS_DIR, now = () => new Date(), port = DEFAULT_PORT, workerUrl }) {
   const scenarios = () => loadScenarios(scenariosDir);
   const getDef = (id) => {
     const def = scenarios().get(id);
@@ -173,6 +177,18 @@ export function createSimulator({ aws, git, paths, scenariosDir, now = () => new
         if (!validAnchor(anchor)) return sendJson(res, 400, { error: 'anchor must be a date like 2026-11-15' });
         const def = getDef(url.searchParams.get('scenario'));
         return sendJson(res, 200, { scenario: def.id, anchor, seed: SEED, fingerprint: scenarioFingerprint(def, { seed: SEED, anchor }) });
+      }
+      const review = p.match(/^\/api\/scenarios\/([a-z0-9-]+)\/business-review$/);
+      if (req.method === 'GET' && review) {
+        const def = getDef(review[1]);
+        const body = await readFile(path.join(businessDocsDir, `${def.id}.md`)).catch(() => null);
+        if (!body) return sendJson(res, 404, { error: `no business review for '${def.id}' (business-docs/${def.id}.md)` });
+        res.writeHead(200, {
+          'content-type': 'text/markdown; charset=utf-8',
+          'content-disposition': `attachment; filename="${BUSINESS_REVIEW_FILENAME}"`,
+          'cache-control': 'no-store',
+        });
+        return res.end(body);
       }
       const reveal = p.match(/^\/api\/scenarios\/([a-z0-9-]+)\/reveal$/);
       if (req.method === 'GET' && reveal) {

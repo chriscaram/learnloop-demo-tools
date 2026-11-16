@@ -65,9 +65,15 @@ function renderCards() {
   for (const s of ui.scenarios) {
     const card = el('button', { type: 'button', class: 'card', role: 'radio', 'aria-checked': String(s.id === ui.selected) },
       el('h3', { text: s.title }), el('p', { text: s.description }),
+      el('p', { class: 'expected' }, el('strong', { text: 'Expected finding: ' }), document.createTextNode(s.expected_finding)),
       el('span', { class: 'tag', text: s.status === 'verified' ? 'Checked against the agent\'s detectors' : 'Experimental: not shown to make a finding fire' }));
     card.addEventListener('click', () => { ui.selected = s.id; renderCards(); updateFingerprint(); });
     host.append(card);
+  }
+  const download = $('#business-review');
+  if (download) {
+    download.href = ui.selected ? `/api/scenarios/${encodeURIComponent(ui.selected)}/business-review` : '#';
+    download.toggleAttribute('aria-disabled', !ui.selected);
   }
 }
 async function updateFingerprint() {

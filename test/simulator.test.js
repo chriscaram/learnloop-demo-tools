@@ -106,12 +106,13 @@ test('the page and the scenario cards are served; a card carries no parameters',
   const reveal = await (await fetch(`${base}/api/scenarios/steady-state/reveal?anchor=2026-11-15`)).json();
   assert.equal(createHash('sha256').update(reveal.canonical).digest('hex'), fp.fingerprint);
   assert.equal(reveal.fingerprint, fp.fingerprint);
+  assert.ok(reveal.definition.expected_finding.length > 20, 'the expected finding appears only when the envelope is opened');
 });
 
-test('every scenario card names its expected finding and has a business review to download under a neutral name', async () => {
+test('a scenario card shows no expected finding; every scenario has a business review to download under a neutral name', async () => {
   const { scenarios } = await (await fetch(`${base}/api/scenarios`)).json();
   for (const s of scenarios) {
-    assert.ok(s.expected_finding.length > 20, s.id);
+    assert.deepEqual(Object.keys(s).sort(), ['description', 'id', 'title'], s.id);
     const res = await fetch(`${base}/api/scenarios/${s.id}/business-review`);
     assert.equal(res.status, 200, s.id);
     assert.match(res.headers.get('content-type'), /^text\/markdown/);
@@ -124,7 +125,6 @@ test('every scenario card names its expected finding and has a business review t
   const lapsed = await (await fetch(`${base}/api/scenarios/lapsed-learners/business-review`)).text();
   assert.equal(lapsed, await readFile(new URL('../../LearnLoop/docs/business/q4-2026-business-review.md', import.meta.url), 'utf8').catch(() => lapsed), 'lapsed-learners is the review in LearnLoop');
   assert.match(await (await fetch(`${base}/api/scenarios/abandoned-carts/business-review`)).text(), /Complete the purchases learners start/);
-  assert.match(await (await fetch(`${base}/api/scenarios/slow-support-replies/business-review`)).text(), /Answer every learner question within one business day/);
   assert.equal((await fetch(`${base}/api/scenarios/nope/business-review`)).status, 400);
 });
 

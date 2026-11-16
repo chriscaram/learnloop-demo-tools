@@ -1,6 +1,5 @@
 // Entry point used by the CLI, the upload script and the tests.
 import { DAY_MS, HISTORY_DAYS, LEARNING_ROUTES, simulate } from './model.js';
-import { BACKLOG_JOB } from './contract/actions.js';
 import { replyDueAt } from './contract/support.js';
 import { emitLogs } from './emit.js';
 import { DEFAULT_SCENARIO, getScenario } from './scenarios.js';
@@ -179,10 +178,9 @@ function cartView(sim, api, dayOf) {
   };
 }
 
-/** ISO weeks (Monday to Sunday) inside days -60..-1: questions asked and answered, reply times, the open backlog, the daily check's warnings. */
+/** ISO weeks (Monday to Sunday) inside days -60..-1: questions asked and answered, reply times, the questions still open. */
 function supportView(sim, dayOf) {
   const requests = sim.data.support_requests;
-  const warnings = (sim.systemLogs ?? []).filter((l) => l.errorType === BACKLOG_JOB.errorType);
   const median = (xs) => {
     if (!xs.length) return null;
     const sorted = [...xs].sort((a, b) => a - b);
@@ -208,7 +206,6 @@ function supportView(sim, dayOf) {
       medianReplyHours: median(answered.map((r) => (Date.parse(r.answered_at) - Date.parse(r.created_at)) / 3_600_000)),
       answeredWithinTarget: answered.filter((r) => Date.parse(r.answered_at) <= replyDueAt(r.created_at).getTime()).length,
       openAtEnd: requests.filter((r) => Date.parse(r.created_at) < toMs && (!r.answered_at || Date.parse(r.answered_at) >= toMs)).length,
-      backlogWarnings: warnings.filter((w) => w.ts >= fromMs && w.ts < toMs).length,
       topics: asked.reduce((acc, r) => ({ ...acc, [r.topic]: (acc[r.topic] ?? 0) + 1 }), {}),
     });
   }
@@ -222,11 +219,6 @@ function supportView(sim, dayOf) {
       overdueAtStart: open.filter((r) => replyDueAt(r.created_at) <= anchorDate).length,
       oldestOpenDay: open.length ? Math.min(...open.map((r) => dayOf(Date.parse(r.created_at)))) : null,
     },
-    // what the daily check will log on the first days after the start date if nobody answers
-    projectedWarningsPerDay: [1, 2, 3, 4, 5, 6, 7].map((d) => {
-      const at = new Date(sim.anchorMs + (d - 1) * DAY_MS + BACKLOG_JOB.hourUtc * 3_600_000);
-      return open.filter((r) => replyDueAt(r.created_at) <= at).length;
-    }),
   };
 }
 

@@ -2,8 +2,7 @@
 // request stream (turned into CloudFront and application logs by emit.js) and
 // the end state (written as data/seed/*.json), so the two always agree.
 import { addMonths } from './contract/billing.js';
-import { BACKLOG_JOB, SUPPORT_REPLY_NOTIFICATION } from './contract/actions.js';
-import { replyDueAt } from './contract/support.js';
+import { SUPPORT_REPLY_NOTIFICATION } from './contract/actions.js';
 import {
   BROWSER_USER_AGENTS, COURSES, EDGE_LOCATIONS, FIRST_NAMES, HOURLY_WEIGHTS, LAST_NAMES, SUPPORT_QUESTIONS, SUPPORT_REPLIES,
   WEEKDAY_FACTORS,
@@ -232,7 +231,6 @@ export function simulate({ anchor, seed, scenario = undefined }) {
   }
   const purchaseShare = (u, day) => (u.abandonsFromDay !== undefined && day >= u.abandonsFromDay ? 0 : C.purchaseShare);
   const supportRequests = [];
-  const systemLogs = [];
 
   // cancellation schedule: [first day, last day, how many from cohort C, how many from cohort B]
   const cxRng = createRng(seed, 'cancellations');
@@ -567,7 +565,6 @@ export function simulate({ anchor, seed, scenario = undefined }) {
 
     const dayRequests = [];
     for (const p of plans) runSession(p, day, dayRequests);
-    if (S) runBacklogCheck(start);
 
     // a well-known crawler on public pages, about 1% of requests
     const crawlerCount = Math.round(dayRequests.length * 0.0102);
@@ -1072,17 +1069,6 @@ export function simulate({ anchor, seed, scenario = undefined }) {
     }
   }
 
-  // The admin function's daily check (07:00 UTC): one warning per open question past its reply time.
-  function runBacklogCheck(dayStartMs) {
-    const at = dayStartMs + BACKLOG_JOB.hourUtc * 3600_000 + supRng.int(200, 1800);
-    const requestId = supRng.uuid();
-    const traceId = supRng.hex(32);
-    const overdue = supportRequests.filter((r) => Date.parse(r.created_at) < at && (!r.answered_at || Date.parse(r.answered_at) > at) && replyDueAt(r.created_at).getTime() <= at);
-    overdue.forEach((r, i) => {
-      systemLogs.push({ service: BACKLOG_JOB.service, ts: at + 40 + i * 3, requestId, traceId, level: BACKLOG_JOB.level, message: BACKLOG_JOB.message, errorType: BACKLOG_JOB.errorType });
-    });
-  }
-
   // ---------------------------------------------------------------- end state
   const users = [...staff, ...learners]
     .map((u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, created_at: u.created_at }))
@@ -1110,9 +1096,8 @@ export function simulate({ anchor, seed, scenario = undefined }) {
 
   requests.sort((a, b) => a.ts - b.ts);
   systemEvents.sort((a, b) => a.ts - b.ts);
-  systemLogs.sort((a, b) => a.ts - b.ts);
   return {
-    anchorMs, data, requests, systemEvents, systemLogs, versions, learners, staff, scenario: def,
+    anchorMs, data, requests, systemEvents, versions, learners, staff, scenario: def,
     slowRelease: slowRelease ? { version: slowRelease.version, from: iso(slowRelease.fromMs) } : null,
     groups: {
       cohortA: cohortA.map((u) => u.id), cohortB: cohortB.map((u) => u.id), cohortC: cohortC.map((u) => u.id),

@@ -90,7 +90,6 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px 
 .card[aria-checked="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-soft); }
 .card h3 { margin: 0; }
 .card p { margin: 0; color: var(--ink-soft); font-size: 0.95rem; }
-.card .tag { font-size: 0.8rem; color: var(--ink-muted); }
 
 .seal { display: grid; grid-template-columns: 1.3fr 1fr; gap: 2rem; padding: 1.4rem; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; margin-bottom: 1.6rem; }
 .seal-text p { color: var(--ink-soft); }
@@ -193,7 +192,6 @@ dialog menu { display: flex; justify-content: flex-end; gap: 0.8rem; padding: 0;
 }
 @media (prefers-reduced-motion: reduce) { .bar span { transition: none; } }
 
-.card .expected { font-size: 0.875rem; color: var(--ink-soft); }
 .business-review { margin: 0.75rem 0 1.25rem; }
 .button-link { display: inline-block; padding: 0.45rem 0.9rem; border: 1px solid var(--accent); border-radius: 6px; color: var(--accent); font-weight: 600; text-decoration: none; }
 .button-link:hover { background: var(--accent-soft); }

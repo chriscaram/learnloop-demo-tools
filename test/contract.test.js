@@ -76,10 +76,10 @@ test('copied support rules match services/notifications/src/services/support.js'
 /**
  * Runs the real LearnLoop handlers for every row of src/contract/actions.js and checks
  * the lines they write: the events in order (name, entity type, actor), then exactly one
- * request line with the route template, and the daily backlog warning.
+ * request line with the route template.
  */
 test('the actions the history uses log exactly what src/contract/actions.js says', { skip: !available && 'LearnLoop repository not found' }, async () => {
-  const { ACTIONS, BACKLOG_JOB, SUPPORT_REPLY_NOTIFICATION } = await import('../src/contract/actions.js');
+  const { ACTIONS, SUPPORT_REPLY_NOTIFICATION } = await import('../src/contract/actions.js');
   const testing = await load('packages/shared/src/testing.js');
   const handlers = Object.fromEntries(await Promise.all(['catalog', 'notifications', 'admin'].map(async (s) => [s, (await load(`services/${s}/src/handler.js`)).handler])));
   const { IDS } = testing;
@@ -120,19 +120,6 @@ test('the actions the history uses log exactly what src/contract/actions.js says
     assert.equal(replied.events[1]['entity.id'], requestId);
     const note = (await env.store.read('notifications')).find((n) => n.id === replied.events[0]['entity.id']);
     assert.deepEqual([note.type, note.title, note.link], [SUPPORT_REPLY_NOTIFICATION.type, SUPPORT_REPLY_NOTIFICATION.title, SUPPORT_REPLY_NOTIFICATION.link]);
-
-    env.logs.clear();
-    assert.deepEqual(await handlers.admin({ listJobs: true }), { jobs: [BACKLOG_JOB.job] });
-    await handlers.admin({ job: BACKLOG_JOB.job });
-    const warnings = env.logs.records.filter((r) => r.kind === 'log');
-    assert.equal(warnings.length, 1, 'the fixture holds one overdue open question');
-    const w = warnings[0];
-    assert.deepEqual([w['service.name'], w.level, w.message, w['error.type']], [BACKLOG_JOB.service, BACKLOG_JOB.level, BACKLOG_JOB.message, BACKLOG_JOB.errorType]);
-    const rebuilt = copyLogger.buildLogRecord({
-      timestamp: w.timestamp, service: w['service.name'], version: w['service.version'], environment: w['deployment.environment'],
-      traceId: w.trace_id, requestId: w.request_id, level: BACKLOG_JOB.level, message: BACKLOG_JOB.message, errorType: BACKLOG_JOB.errorType,
-    });
-    assert.equal(copyLogger.serialize(rebuilt), JSON.stringify(w), 'the generator writes the same warning line');
   } finally {
     env.logs.restore();
   }

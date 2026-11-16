@@ -9,7 +9,7 @@
 // localhost in its Host header (a page on another site cannot reach it through DNS
 // rebinding). It runs with the operator's own AWS credentials and git setup.
 //
-//   GET  /api/scenarios                       the cards: id, title, description, expected finding (no parameters)
+//   GET  /api/scenarios                       the cards: id, title, description (no expected finding, no parameters)
 //   GET  /api/scenarios/:id/business-review   business-docs/<id>.md, as a download with a neutral file name
 //   GET  /api/fingerprint?scenario=&anchor=   SHA-256 of the sealed definition + seed + anchor
 //   GET  /api/scenarios/:id/reveal?anchor=    the whole definition, in plain words too

@@ -235,7 +235,7 @@ function plainSupport(s) {
   return lines;
 }
 
-/** The card shown before the reveal: no parameters. It names the finding the presenter should expect. */
+/** The card shown before the reveal: the title and the audience description only (no expected finding, no parameters). */
 export function publicCard(def) {
-  return { id: def.id, title: def.title, description: def.description, status: def.status, expected_finding: def.expected_finding };
+  return { id: def.id, title: def.title, description: def.description };
 }

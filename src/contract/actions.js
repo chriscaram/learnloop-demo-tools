@@ -23,16 +23,6 @@ export const ACTIONS = Object.freeze({
   },
 });
 
-/** The daily support backlog check (admin, job check_support_backlog): one warning per overdue open question. */
-export const BACKLOG_JOB = Object.freeze({
-  service: 'admin',
-  job: 'check_support_backlog',
-  hourUtc: 7,
-  level: 'warn',
-  message: 'support request waiting for a reply',
-  errorType: 'SupportReplyTimeout',
-});
-
 /** The inbox notification a reply creates. */
 export const SUPPORT_REPLY_NOTIFICATION = Object.freeze({
   type: 'support_reply',

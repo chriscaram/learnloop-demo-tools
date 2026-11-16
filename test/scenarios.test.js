@@ -6,7 +6,6 @@ import assert from 'node:assert/strict';
 import { generate } from '../src/generate.js';
 import { completionPercent } from '../src/contract/progress.js';
 import { DAY_MS, PERSONAS } from '../src/model.js';
-import { replyDueAt } from '../src/contract/support.js';
 import {
   canonicalJson, getScenario, loadScenarios, plainParameters, publicCard, scenarioFingerprint, validateScenario,
 } from '../src/scenarios.js';
@@ -24,13 +23,13 @@ before(() => {
 });
 
 test('scenario files: valid, one per id, verified or experimental with reasons', () => {
-  assert.deepEqual(scenarioIds.sort(), ['abandoned-carts', 'lapsed-learners', 'outage-drop', 'slow-lessons', 'slow-support-replies', 'steady-state']);
+  assert.deepEqual(scenarioIds.sort(), ['abandoned-carts', 'lapsed-learners', 'outage-drop', 'slow-lessons', 'steady-state']);
   for (const def of loadScenarios().values()) {
     assert.ok(def.title && def.description && def.expected_finding);
     if (def.status === 'verified') assert.ok(def.verified_against.every((v) => v.file && v.threshold));
     assert.ok(plainParameters(def).length >= 5);
     const card = publicCard(def);
-    assert.deepEqual(Object.keys(card).sort(), ['description', 'expected_finding', 'id', 'status', 'title'], 'a card names the expected finding and reveals no parameters');
+    assert.deepEqual(Object.keys(card).sort(), ['description', 'id', 'title'], 'a card shows the title and the description only: no expected finding, no parameters');
     if (def.status === 'experimental') assert.ok(def.experimental_reason.length > 100, `${def.id} says exactly why it is experimental`);
   }
   const base = getScenario('steady-state');
@@ -41,8 +40,8 @@ test('scenario files: valid, one per id, verified or experimental with reasons',
   const carts = getScenario('abandoned-carts');
   assert.throws(() => validateScenario({ ...carts, parameters: { ...carts.parameters, carts: { ...carts.parameters.carts, purchaseShare: 2 } } }), /purchaseShare/);
   assert.throws(() => validateScenario({ ...carts, parameters: { ...carts.parameters, carts: { ...carts.parameters.carts, extra: 1 } } }), /unknown carts parameters/);
-  const support = getScenario('slow-support-replies');
-  assert.throws(() => validateScenario({ ...support, parameters: { ...support.parameters, support: { ...support.parameters.support, rise: null } } }), /perWeekAfter differs/);
+  const support = getScenario('steady-state');
+  assert.throws(() => validateScenario({ ...support, parameters: { ...support.parameters, support: { ...support.parameters.support, perWeekAfter: 24 } } }), /perWeekAfter differs/);
   assert.throws(() => validateScenario({ ...support, parameters: { ...support.parameters, support: { ...support.parameters.support, topicsAfter: { refunds: 1 } } } }), /topics/);
   assert.equal(getScenario('lapsed-learners').parameters.carts, undefined, 'lapsed-learners predates carts and support and keeps its definition (and fingerprint)');
 });
@@ -148,14 +147,8 @@ function checkCartsAndSupport(id, r) {
   for (const q of support) assert.ok(!text.includes(q.body.slice(0, 40)), `${id}: a question's text is not logged`);
   assert.ok(!text.includes('@'), `${id}: no e-mail in the logs`);
   for (const m of text.matchAll(/"entity\.id":"([^"]+)"/g)) assert.match(m[1], /^[a-z]{2,4}_[0-9a-f]{12}$|^[a-z][a-z0-9_]+$/);
-  // the daily backlog check: one warning per open question past its reply time
-  const warnings = r.sim.systemLogs.filter((l) => l.errorType === 'SupportReplyTimeout');
-  for (const day of [-20, -10, -2]) {
-    const at = r.sim.anchorMs + day * DAY_MS + 7 * 3600_000;
-    const expected = support.filter((q) => Date.parse(q.created_at) < at && (!q.answered_at || Date.parse(q.answered_at) > at) && replyDueAt(q.created_at).getTime() <= at).length;
-    const logged = warnings.filter((w) => w.ts >= at && w.ts < at + 3600_000).length;
-    assert.equal(logged, expected, `${id}: backlog warnings on day ${day}`);
-  }
+  // no support backlog warning (LearnLoop no longer runs a daily backlog check)
+  assert.ok(!text.includes('SupportReplyTimeout'), `${id}: no support backlog warning`);
 }
 
 const dv = (id) => results.get(id).stats;
@@ -165,7 +158,7 @@ test('steady-state: nothing crosses a detector threshold', () => {
   for (const [route, drop] of [['enrol', s.carts.enrolDropPct.ips], ['cart add', s.carts.cartAddDropPct.ips], ['cart read', s.carts.cartReadDropPct.ips]]) {
     assert.ok(Math.abs(drop) < 10, `${route} ${drop}`); // ACTOR_INACTIVITY_DROP_PCT = 33
   }
-  assert.ok(s.support.weeks.every((w) => w.backlogWarnings <= 7 && w.asked <= 8), 'a few questions a week, answered within about a day');
+  assert.ok(s.support.weeks.every((w) => w.asked <= 8), 'a few questions a week, answered within about a day');
   assert.equal(s.support.endState.overdueAtStart, 0);
   assert.ok(Math.abs(s.lessonUsersDropPct) < 5, `lesson users drop ${s.lessonUsersDropPct}`);
   for (const [route, drop] of Object.entries(s.distinctUserDropPct)) assert.ok(drop < 10, `${route} ${drop}`); // ACTOR_INACTIVITY_DROP_PCT = 33
@@ -249,30 +242,4 @@ test('abandoned-carts: the enrol route loses about 45% of its people while cart 
   const titles = new Map(r.data.courses.map((c) => [c.id, c.title]));
   assert.deepEqual(marco.items.map((i) => titles.get(i.course_id)), ['Python for Data Work', 'Data Visualization Fundamentals']);
   assert.deepEqual(marco.items.map((i) => Math.floor((Date.parse(i.added_at) - r.sim.anchorMs) / DAY_MS)), [-16, -9]);
-});
-
-test('slow-support-replies: more questions on a few topics, replies from about a day to about a week, a backlog of open questions', () => {
-  const s = dv('slow-support-replies');
-  const first = s.support.weeks.slice(0, 3);
-  const last = s.support.weeks.slice(-2);
-  const avg = (ws, k) => ws.reduce((a, w) => a + w[k], 0) / ws.length;
-  assert.ok(avg(last, 'asked') >= 4 * Math.max(1, avg(first, 'asked')), `asked ${avg(first, 'asked')} -> ${avg(last, 'asked')} a week`);
-  assert.ok(first.every((w) => w.medianReplyHours === null || w.medianReplyHours <= 60), 'answered within about a day at first');
-  assert.ok(last.every((w) => w.medianReplyHours >= 120), `about a week at the end: ${last.map((w) => w.medianReplyHours)}`);
-  assert.ok(last.every((w) => w.answeredWithinTarget <= 2));
-  const lastTopics = last.reduce((acc, w) => { for (const [k, v] of Object.entries(w.topics)) acc[k] = (acc[k] ?? 0) + v; return acc; }, {});
-  const sorted = Object.values(lastTopics).sort((a, b) => b - a);
-  assert.ok(sorted.slice(0, 3).reduce((a, b) => a + b, 0) >= 0.8 * sorted.reduce((a, b) => a + b, 0), `three topics carry most questions: ${JSON.stringify(lastTopics)}`);
-  assert.ok(s.support.endState.open >= 30 && s.support.endState.overdueAtStart >= 25, JSON.stringify(s.support.endState));
-  // what the deployed daily check will log once the state is loaded: far above MIN_GROUP_SIZE = 10 a week
-  assert.ok(s.support.projectedWarningsPerDay.every((n) => n >= 25), `${s.support.projectedWarningsPerDay}`);
-  assert.ok(first.every((w) => w.backlogWarnings <= 7));
-  assert.ok(Math.abs(s.lessonUsersDropPct) < 5 && Math.abs(s.carts.enrolDropPct.ips) < 10, 'nothing else moves');
-  const r = results.get('slow-support-replies');
-  const ana = r.data.support_requests.filter((q) => q.user_id === PERSONAS.ana.id);
-  assert.equal(ana.length, 1);
-  assert.deepEqual([ana[0].topic, ana[0].status], ['certificate', 'open']);
-  const sofia = r.data.users.find((u) => u.email === PERSONAS.sofia.email);
-  const repliesBy = r.data.support_requests.flatMap((q) => q.replies).reduce((acc, x) => ({ ...acc, [x.staff_id]: (acc[x.staff_id] ?? 0) + 1 }), {});
-  assert.equal(Object.entries(repliesBy).sort((a, b) => b[1] - a[1])[0][0], sofia.id, 'Sofia answers the most questions');
 });

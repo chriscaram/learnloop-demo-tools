@@ -187,10 +187,6 @@ export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, 
     }));
   }
 
-  for (const l of sim.systemLogs ?? []) {
-    pushApp(l.service, l.ts, buildLogRecord({ ...common(l.service, l.ts, l), level: l.level, message: l.message, errorType: l.errorType }));
-  }
-
   const appLogs = new Map();
   for (const key of [...appLines.keys()].sort()) {
     const [service, hour] = key.split('|');

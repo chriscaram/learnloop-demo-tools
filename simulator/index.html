@@ -38,12 +38,12 @@
       <h2>The sealed scenario</h2>
       <p class="purpose">Choose what the simulated learners will do. The Governance Agent is not told which one you chose: it only sees the activity, the way it would see a real customer's.</p>
       <div class="cards" id="cards" role="radiogroup" aria-label="Scenarios"></div>
-      <p class="business-review"><a class="button-link" id="business-review" href="#" download>Download the business review for this scenario</a> <span class="hint">The quarterly review the business would write for this situation. Upload it in the Governance Agent to create the goals; it never names the scenario.</span></p>
+      <p class="business-review"><a class="button-link" id="business-review" href="#" download>Download the business review for this scenario</a> <span class="hint">The quarterly review the business would write for this situation. Upload it in the Governance Agent to create the goals; it never names the scenario. For a scenario revealed in stages, download and upload it once, at stage 1: it already holds every goal.</span></p>
 
       <div class="seal">
         <div class="seal-text">
           <h3>What the simulator is told</h3>
-          <p>Everything the simulator is told — the scenario, the random seed and the start date — is sealed into this fingerprint. Any change to any of them, however small, gives a completely different fingerprint. <strong>The agent is never given this.</strong> At the end of the demo we open the envelope and check that it still matches.</p>
+          <p>Everything the simulator is told — the scenario, the random seed and the start date, and for a staged scenario the stage — is sealed into this fingerprint. Any change to any of them, however small, gives a completely different fingerprint. <strong>The agent is never given this.</strong> At the end of the demo we open the envelope and check that it still matches.</p>
           <div class="seal-inputs">
             <label>Start date (UTC) <input type="date" id="anchor"></label>
             <span>Seed <span class="figure" id="seed">42</span></span>
@@ -58,6 +58,20 @@
       <div class="actions">
         <button type="button" class="primary" id="load">Load this scenario</button>
         <p class="hint" id="load-hint">Clears the old log files, generates the new activity, uploads it, reads it back and publishes the app's starting state. One confirmation.</p>
+        <p class="next-step" id="next-step" hidden></p>
+      </div>
+      <div class="stage-controls" id="stage-controls" hidden>
+        <label class="publish-toggle">
+          <input type="checkbox" id="publish">
+          <span><strong>Also publish the starting state to LearnLoop</strong> (commit and push <code>data/seed/</code> to main, which starts LearnLoop's deploy)</span>
+        </label>
+        <p class="hint">Ticked by default only for the last stage. Upload already puts each stage's starting state where LearnLoop reads it in AWS. Publishing matters for later: LearnLoop's "Preview reset" restores the app's state from main, so main should hold the final state, and an earlier stage does not need a deploy in the middle of the demo.</p>
+        <p class="hint" id="stage-anchor-note" hidden></p>
+        <p class="hint stage-caution">Until a case is loaded and read, do not use its part of LearnLoop yourself (the cart and the checkout before stage 2, the Help page before stage 3): your own visits today would be the only recent visits the agent sees on those pages.</p>
+        <div class="start-over">
+          <button type="button" id="start-over">Start over</button>
+          <span class="hint">Loads stage 1 again. Afterwards remove the LearnLoop application in the Governance Agent and onboard it again: it keeps the highest number of people it has read for every period, so an application that has read a later stage never shows these drops again.</span>
+        </div>
       </div>
       <details class="step-by-step">
         <summary>Step by step</summary>
@@ -143,6 +157,10 @@
           <div>
             <h4>What the Governance Agent should find</h4>
             <p id="reveal-expected" class="expected"></p>
+            <div id="reveal-stages" hidden>
+              <h4>The stages, one case at a time</h4>
+              <ol class="stage-list" id="reveal-stage-list"></ol>
+            </div>
             <p id="reveal-status" class="hint"></p>
             <details>
               <summary>Technical details</summary>

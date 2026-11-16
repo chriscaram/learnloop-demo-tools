@@ -58,7 +58,14 @@ const hourKey = (ms) => {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}-${pad(d.getUTCHours())}`;
 };
 
-export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, environment = 'prod' }) {
+/**
+ * `withhold` ({ routes: Set of "METHOD /route", fromMs }, a stage of a staged reveal):
+ * the lines of those requests stamped at or after `fromMs` are left out. Every random
+ * draw is still made, in the same order, and every hour keeps its CloudFront object
+ * (header only, if nothing in it is left), so all other lines, and every object key,
+ * are byte for byte what the same generation writes without `withhold`.
+ */
+export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, environment = 'prod', withhold = null }) {
   const rng = createRng(seed, 'emit');
   const userPseudo = new Map();
   const sessionPseudo = new Map();
@@ -95,6 +102,8 @@ export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, 
   const host = distributionDomain;
 
   for (const req of sim.requests) {
+    const held = !!withhold && req.kind === 'api' && withhold.routes.has(`${req.method} ${req.route}`);
+    const kept = (ms) => !held || ms < withhold.fromMs;
     let edgeMs;
     let bytesOut;
     let contentType;
@@ -104,7 +113,7 @@ export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, 
       const sPseudo = req.sessionId ? ps(req.sessionId) : undefined;
       for (const e of req.events) {
         const actorIsUser = e.actorType !== 'system' || req.userId;
-        pushApp(req.service, e.ts, buildEventRecord({
+        if (kept(e.ts)) pushApp(req.service, e.ts, buildEventRecord({
           ...common(req.service, e.ts, req),
           userPseudoId: actorIsUser ? uPseudo : undefined,
           sessionPseudoId: actorIsUser ? sPseudo : undefined,
@@ -113,10 +122,10 @@ export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, 
         }));
       }
       const done = req.ts + req.latencyMs;
-      if (req.logError) {
+      if (req.logError && kept(done - 1)) {
         pushApp(req.service, done - 1, buildLogRecord({ ...common(req.service, done - 1, req), level: 'error', message: 'unhandled error', errorType: req.logError }));
       }
-      pushApp(req.service, done, buildRequestRecord({
+      if (kept(done)) pushApp(req.service, done, buildRequestRecord({
         ...common(req.service, done, req),
         method: req.method, route: req.route, statusCode: req.status, latencyMs: req.latencyMs,
         userPseudoId: uPseudo, sessionPseudoId: sPseudo, userAgent: req.ua,
@@ -176,7 +185,7 @@ export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, 
     ];
     const key = hourKey(finished);
     if (!cfLines.has(key)) cfLines.set(key, []);
-    cfLines.get(key).push([finished, fields.join('\t')]);
+    if (kept(finished)) cfLines.get(key).push([finished, fields.join('\t')]);
   }
 
   for (const e of sim.systemEvents) {

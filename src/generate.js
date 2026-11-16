@@ -2,7 +2,8 @@
 import { DAY_MS, HISTORY_DAYS, LEARNING_ROUTES, simulate } from './model.js';
 import { replyDueAt } from './contract/support.js';
 import { emitLogs } from './emit.js';
-import { DEFAULT_SCENARIO, getScenario } from './scenarios.js';
+import { SUPPORT_REPLY_NOTIFICATION } from './contract/actions.js';
+import { DEFAULT_SCENARIO, getScenario, stageOf } from './scenarios.js';
 
 export const PLACEHOLDER_DISTRIBUTION_ID = 'E000000SEEDLOG';
 export const PLACEHOLDER_DISTRIBUTION_DOMAIN = 'd000000seedlog.cloudfront.net';
@@ -11,15 +12,54 @@ export function todayUtc(now = new Date()) {
   return now.toISOString().slice(0, 10);
 }
 
+/**
+ * `stage` (a staged scenario only, 1..n; README "Presenting the staged reveal"): the same
+ * generation with the stage's withheld traffic and state left out. No stage, or the last
+ * one, is the whole scenario, byte for byte.
+ */
 export function generate({
-  anchor = todayUtc(), salt, seed = 42, scenario = DEFAULT_SCENARIO,
+  anchor = todayUtc(), salt, seed = 42, scenario = DEFAULT_SCENARIO, stage = null,
   distributionId = PLACEHOLDER_DISTRIBUTION_ID, distributionDomain = PLACEHOLDER_DISTRIBUTION_DOMAIN,
 } = {}) {
   if (!salt) throw new Error('--salt is required (use the value stored in /learnloop/prod/log-pseudonym-salt)');
   const def = typeof scenario === 'object' && scenario ? scenario : getScenario(scenario);
+  const st = stageOf(def, stage);
   const sim = simulate({ anchor, seed, scenario: def });
-  const logs = emitLogs(sim, { salt, seed, distributionId, distributionDomain });
-  return { sim, data: sim.data, ...logs, stats: computeStats(sim, logs) };
+  const withhold = stageWithhold(sim, st);
+  const logs = emitLogs(sim, { salt, seed, distributionId, distributionDomain, withhold });
+  const view = stageView(sim, st);
+  return { sim, data: view.data, ...logs, stats: stageStats(view, logs, st), stage: st?.stage ?? null };
+}
+
+/** The simulation as a stage shows it: withheld requests and state left out (the same object for no stage). */
+export function stageView(sim, st) {
+  const withhold = stageWithhold(sim, st);
+  const data = stageState(sim.data, st);
+  if (!withhold && data === sim.data) return sim;
+  return { ...sim, data, requests: withhold ? sim.requests.filter((r) => !isWithheld(r, withhold)) : sim.requests };
+}
+
+/** computeStats over a stage view, labelled with the stage. */
+export function stageStats(view, logs, st) {
+  return { ...computeStats(view, logs), stage: st ? { stage: st.stage, of: st.count, addsCase: st.addsCase } : null };
+}
+
+/** What a stage leaves out of the logs: null when nothing (no stage, or the last one). */
+export function stageWithhold(sim, st) {
+  if (!st || st.withheldRoutes.size === 0) return null;
+  return { routes: st.withheldRoutes, fromMs: sim.anchorMs + st.fromDay * DAY_MS };
+}
+/** Whether one simulated request is left out (by its start time; the logs decide per line). */
+export const isWithheld = (r, withhold) => !!withhold && r.kind === 'api' && r.ts >= withhold.fromMs && withhold.routes.has(`${r.method} ${r.route}`);
+
+/** The starting state of a stage: the withheld documents written empty. */
+export function stageState(data, st) {
+  if (!st || st.stateWithheld.size === 0) return data;
+  const out = { ...data };
+  if (st.stateWithheld.has('carts')) out.carts = [];
+  if (st.stateWithheld.has('support_requests')) out.support_requests = [];
+  if (st.stateWithheld.has('support_reply_notifications')) out.notifications = data.notifications.filter((n) => n.type !== SUPPORT_REPLY_NOTIFICATION.type);
+  return out;
 }
 
 const percentile = (values, p) => {
@@ -160,14 +200,17 @@ function capabilityView(api, dayOf) {
     svc.routes.get(r.route)[w].add(r.ip);
   }
   const drop = (a, b) => (a ? Math.round(((a - b) / a) * 1000) / 10 : null);
+  // A route with no request in a window has no baseline for that window at all (the
+  // agent writes one per route it saw), so it is unmeasured there, not a 100% drop.
+  const routeDrop = (a, b) => (a && b ? drop(a, b) : null);
   const out = {};
   for (const [service, svc] of [...byService.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     const routes = Object.fromEntries([...svc.routes.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([route, w]) => [route, {
-      earlier: w.earlier.size, recent: w.recent.size, dropPct: drop(w.earlier.size, w.recent.size),
+      earlier: w.earlier.size, recent: w.recent.size, dropPct: routeDrop(w.earlier.size, w.recent.size),
     }]));
     const max = (w) => Math.max(0, ...Object.values(routes).map((r) => r[w]));
     const inactiveRoutes = Object.entries(routes)
-      .filter(([, r]) => r.earlier >= INACTIVITY_BARS.minEarlierActors && r.dropPct >= INACTIVITY_BARS.dropPct)
+      .filter(([, r]) => r.dropPct !== null && r.earlier >= INACTIVITY_BARS.minEarlierActors && r.dropPct >= INACTIVITY_BARS.dropPct)
       .sort((a, b) => (b[1].earlier - a[1].earlier) || a[0].localeCompare(b[0]))
       .map(([route]) => route);
     out[service] = {

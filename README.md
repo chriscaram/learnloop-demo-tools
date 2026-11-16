@@ -20,7 +20,8 @@ src/cli.js         npm run seed
 src/upload.js      npm run seed:upload (and the upload sets the simulator shares)
 src/simulator/     npm run simulator: node:http server, SSE progress, actions, AWS and git layers, log-line sentences
 simulator/         the page: index.html, app.js, styles.css (no libraries, no CDN)
-test/              generator, scenario and simulator checks, plus contract checks against ../LearnLoop
+test/              generator, scenario, staged-reveal and simulator checks, contract checks against ../LearnLoop,
+                   and the staged reveal run through the Governance Agent's own detectors (../governance-agent)
 ```
 
 `test/contract.test.js` compares the copies in `src/contract/` with the LearnLoop code, and runs the real LearnLoop handlers for every row of `src/contract/actions.js` (cart read/add/remove, enrol, support list/ask, staff queue/reply) to check the event lines, their order before the request line, entity types, actors and route templates the generator writes. It runs when the LearnLoop repository, with `node_modules` installed, is at `../LearnLoop` or at `$LEARNLOOP_REPO`, and is skipped otherwise. Run it after any change to the LearnLoop logger or to those routes.
@@ -39,7 +40,7 @@ npm run seed -- --scenario lapsed-learners --anchor 2026-11-03 --salt "$SALT" --
 npm run seed:upload
 ```
 
-`--scenario` defaults to `lapsed-learners`; see [Scenarios](#scenarios). The simulator page does all of this without a terminal: see [The Activity Simulator](#the-activity-simulator).
+`--scenario` defaults to `lapsed-learners`; see [Scenarios](#scenarios). `--stage <n>` generates one stage of a staged scenario (`q4-three-signals`, stages 1 to 3; see [Presenting the staged reveal](#presenting-the-staged-reveal)); without it, or with the last stage, the output is the whole scenario. The simulator page does all of this without a terminal: see [The Activity Simulator](#the-activity-simulator).
 
 `npm run seed` is deterministic: the same arguments produce byte-identical output. It writes:
 
@@ -126,7 +127,7 @@ Dropped, with the reason:
 
 ### Presenting q4-three-signals
 
-**q4-three-signals.** Load it as usual, then onboard LearnLoop as a **fresh** application in the Governance Agent (see the next section: an application that has read another scenario keeps that scenario's windows). Upload `business-docs/q4-three-signals.md` (the simulator's "Download the business review" button) and confirm its three goals. Then check, on each goal, that it is linked to the capability that holds its routes; if not, link it:
+**q4-three-signals.** Load it as usual (or one case at a time: see [Presenting the staged reveal](#presenting-the-staged-reveal)), then onboard LearnLoop as a **fresh** application in the Governance Agent (see the next section: an application that has read another scenario keeps that scenario's windows). Upload `business-docs/q4-three-signals.md` (the simulator's "Download the business review" button) and confirm its three goals. Then check, on each goal, that it is linked to the capability that holds its routes; if not, link it:
 
 | Goal in the review | Link it to the capability that holds | Capability name before the cart and Help code existed | Finding |
 |---|---|---|---|
@@ -143,6 +144,52 @@ The findings follow the telemetry read like lapsed-learners'. The AI agent each 
 - **Help** — draft answers to the open, repetitive questions in `support_requests.json` for the staff to check and send (the earlier answers to the same questions are in the same file, with the staff member who wrote them). Personas: **Lena Hoffmann** (her certificate question has been open since day −12) and **Sofia Lindqvist** (Admin → Support requests shows the open queue, the oldest from about a month ago).
 
 All passwords are `learnloop-demo`.
+
+### Presenting the staged reveal
+
+`q4-three-signals` can also be revealed **one case at a time on one Governance Agent application**: onboard LearnLoop once, then each load adds a case, and the agent finds it beside the ones already found. The simulator page does this with one button per stage (**Load stage N — adds case N**).
+
+**Why the stages are built the way they are** (read from the Governance Agent code):
+
+- "Get usage telemetry" (Settings → Connections → Usage telemetry; the button was called "Look for data now" before 15 November) runs source detection, then reads **days −29 … 0** again (`backend/src/cadence.js` `continueAfterTelemetryDetection`, window from `packages/platform/telemetry/runs.js` `telemetryWindow`). Only after the **first** read of an application does it also read **days −59 … −30** (`continueAfterTelemetryIngest`, `GA_TELEMETRY_HISTORY_WINDOWS` = 1): every later read finds that history already read (`history_already_read`). So the earlier window is read exactly once, when the application is onboarded.
+- The agent keeps the **highest** distinct-user count it has read for a window (`drift/usage.js` `actorWindowsOf`). A drop that a later stage wants to show must therefore never have had its recent window filled in by an earlier stage.
+- A route with no request in a window gets **no baseline** for that window (`platform/telemetry/ingestion.js`: one baseline per route the read saw), so it has one measured window and the inactivity rule stands down (`too_few_measured_windows`); it is not read as a 100% drop.
+- After each read the usage-and-drift look runs again (`telemetry.baselines.updated`, `drift/subscribe.js`). A finding already live for the same code and capability is not raised twice and is not closed by a later run (`structural/dedup.js`: `duplicate_live`).
+
+So every stage carries the **final** traffic of days −60 … −30, and withholds only the **recent** traffic (day −29 on) of the routes whose drop is a later case. Stage 3 is `q4-three-signals` itself, byte for byte. The definition is in the scenario file (`staged_reveal`), sealed with it; each stage has its own fingerprint (the stage is a fourth sealed input).
+
+| Stage | Adds | Left out of the logs from day −29 on | Starting state | Publishes by default |
+|---|---|---|---|---|
+| 1 | case 1, lessons | `POST /api/courses/{courseId}/enrol`, `POST /api/me/cart/items`, `DELETE /api/me/cart/items/{courseId}`, `GET` and `POST /api/me/support-requests` | no carts, no support questions, no reply notifications | no |
+| 2 | case 2, the checkout | `GET` and `POST /api/me/support-requests` | no support questions, no reply notifications | no |
+| 3 | case 3, Help | nothing | the whole state | yes |
+
+The cart write routes are withheld with enrolment in stage 1 because the agent's goal-trend rule reads a capability's daily series route by route (later rows win), and with only enrolment withheld it saw a fall in the purchases goal in stage 1. `GET /api/me/cart`, the course pages, the bell and the inbox stay in every stage: they are the busiest routes of their capabilities, so the capability-level count never moves and nothing about the store or Help shows before its stage. `test/governance-agent.test.js` runs the agent's own `observationsForGoal` over the baselines each stage produces (start dates on all seven weekdays) and checks exactly that.
+
+**What appears after each stage** (start dates on all seven weekdays, distinct client IPs, earlier → recent window):
+
+| After | New finding | Numbers | Already there, unchanged |
+|---|---|---|---|
+| stage 1 | fewer people open lessons, "Course delivery and learner progress" | `GET /api/lessons/{lessonId}` 334 → 193 (−42%), progress route −45 … −46% | — |
+| stage 2 | fewer people complete the enrol step, the catalog and purchase capability | `POST /api/courses/{courseId}/enrol` 298 … 311 → 145 … 160 (−46 … −53%) | the lessons finding |
+| stage 3 | fewer people come back to Help, the notifications and Help capability | `/api/me/support-requests` 290 … 307 → 148 … 155 (−47 … −50%) | the lessons and enrol findings |
+
+**The presenter, step by step:**
+
+1. **Before the demo.** In the Governance Agent, remove any LearnLoop application that has read another scenario or another run of this one. Download the business review once (the simulator's "Download the business review" button): it states all three goals and is the right document for stage 1, because a finding needs a confirmed goal linked to its capability, and the goals of cases 2 and 3 raise nothing until their traffic arrives.
+2. **Stage 1.** Simulator: **Load stage 1 — adds case 1** (start date: today). When it is done, in the Governance Agent: onboard LearnLoop as a new application; connecting usage telemetry starts the first read (days −29 … 0, then the history, days −59 … −30). Upload the business review, confirm the three goals and check each goal's capability link (table in "Presenting q4-three-signals" above). **What appears:** the lessons finding. Nothing about the store or Help.
+3. **Stage 2.** Simulator: **Load stage 2 — adds case 2** (the start date stays the one of stage 1). When it is done, in the Governance Agent: **Settings → Connections → Usage telemetry → Get usage telemetry**, and wait for the look for opportunities to finish (a few minutes). **What appears:** the enrol finding, beside the lessons finding.
+4. **Stage 3.** Simulator: **Load stage 3 — adds case 3**. This one also publishes the starting state (the option is ticked by default for the last stage). Then the same in the Governance Agent: Settings → Connections → Usage telemetry → Get usage telemetry. **What appears:** the Help finding, beside the other two.
+5. **The envelope.** "Open the envelope" shows every stage, its fingerprint, and checks the loaded stage's fingerprint against the one shown before.
+
+Rules that keep it working:
+
+- **One start date for all stages, and onboard on that day.** The page keeps the stage-1 start date for stages 2 and 3 and the server refuses another one, or a stage out of order (stage 3 before stage 2), or going back. Stages 2 and 3 may be read on a later day; the history window was fixed at onboarding.
+- **Do not use a case's part of LearnLoop before its stage is loaded and read** (the cart and checkout before stage 2, the Help page before stage 3). The current window ends today, so your own clicks would be the only recent visits to those routes and the agent would find a near-100% drop with the wrong numbers.
+- **Wait for the load to finish before "Get usage telemetry".** Load clears the logs first; a read in the middle of an upload sees part of the stage (the max-merge protects the people counts, but the trend rules read the latest daily counts).
+- **Findings about the goals themselves** (how a goal is measured, for example a goal with no measurable data source) come from the goals and the capability model, not from the traffic, so they are the same in every stage and in a single load. The stages only decide when each usage finding appears.
+- **Start over** (on the page) loads stage 1 again. Afterwards remove the LearnLoop application in the Governance Agent and onboard it again: an application that has read a later stage keeps those recent counts forever and will never show these drops.
+- **Publishing.** Upload already writes each stage's starting state to the state bucket LearnLoop reads. Publishing commits `data/seed/` to LearnLoop's main and pushes, which starts LearnLoop's deploy, whose "Preview reset" restores the state from main. So only the last stage publishes by default (main ends with the final state, and the demo has no deploy in the middle); the page has a per-load option to publish an earlier stage. The commit message names only the stage's fingerprint.
 
 ### Before you load a different scenario
 
@@ -172,9 +219,11 @@ Actions (each streamed to the page as Server-Sent Events, one at a time; a secon
 | Verify | Lists the three prefixes back (files, first and last day) against the generated counts and shows one random file as sentences and raw lines. | no |
 | Publish the starting state | In the LearnLoop repository: refuses unless on `main` and nothing outside `data/seed/` is changed; `git add data/seed`, commit, push to `origin main`. Skipped when the files are unchanged. **Pushing to main also starts LearnLoop's production deploy** (its "Preview reset" workflow restores state from these files). | yes |
 | Load this scenario | Clear → Generate → Upload → Verify → Publish, one confirmation. | yes |
+| Load stage N — adds case N | For a staged scenario (`q4-three-signals`): the same chain for the next stage. Publish runs only for the last stage unless "Also publish the starting state" is ticked for this load. Refused, before anything is touched, for a stage out of order, a different start date, or a stage before the one loaded. | yes |
+| Start over | Load stage 1 again (today's date). The confirmation says that the Governance Agent application must then be removed and onboarded again. | yes |
 
 The commit message names the scenario by its sealed fingerprint (`Seed: load sealed scenario <first 12 hex> anchored on <date>`), not by its id: the agent reads the LearnLoop repository, and a commit titled `lapsed-learners` would tell it the answer. Set `SIMULATOR_COMMIT_SCENARIO_NAME=1` to put the id in the subject instead. The message ends with the `Co-Authored-By` line.
 
 **Rehearsal (dry run).** The toggle on the page (or `"dryRun": true`) runs the same steps with every write removed: the AWS and git layers' write methods are replaced by functions that throw. Clear lists what it would delete, Generate writes into `state/dry-run/` instead of LearnLoop, Upload counts what it would send, Verify reads the rehearsal folder back, Publish compares the files and says whether it would commit. Read-only calls (stack outputs, the salt, listings) still use your credentials; without them a rehearsal falls back to placeholders and says so.
 
-Local state (git-ignored, `state/`): `loaded.json` (which scenario and start date are in AWS, when, by which action, and whether the starting state was published), `generated.json`, and `last-run.json` (the last real generation's statistics, which the page's "Replay" button redraws, labelled as a replay).
+Local state (git-ignored, `state/`): `loaded.json` (which scenario, stage and start date are in AWS, when, by which action, and whether the starting state was published), `generated.json`, and `last-run.json` (the last real generation's statistics, which the page's "Replay" button redraws, labelled as a replay).

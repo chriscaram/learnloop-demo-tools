@@ -112,7 +112,7 @@ test('the page and the scenario cards are served; a card carries no parameters',
 test('a scenario card shows no expected finding; every scenario has a business review to download under a neutral name', async () => {
   const { scenarios } = await (await fetch(`${base}/api/scenarios`)).json();
   for (const s of scenarios) {
-    assert.deepEqual(Object.keys(s).filter((k) => k !== 'cases').sort(), ['description', 'id', 'title'], s.id);
+    assert.deepEqual(Object.keys(s).filter((k) => k !== 'cases' && k !== 'stages').sort(), ['description', 'id', 'title'], s.id);
     if (s.cases) assert.ok(s.cases.every((c) => c.title && c.what_changes && c.ai_agent), s.id);
     const res = await fetch(`${base}/api/scenarios/${s.id}/business-review`);
     assert.equal(res.status, 200, s.id);
@@ -270,4 +270,97 @@ test('errors reach the page verbatim, without a stack trace', async () => {
   const last = JSON.parse(text.trim().split('\n\n').at(-1).replace(/^data: /, ''));
   assert.equal(last.message, "refusing to publish: the LearnLoop repository is on branch 'feature', not main");
   assert.ok(!text.includes('    at '), 'no stack trace');
+});
+
+// ------------------------------------------------------------------ the staged reveal
+test('a staged scenario: the card says how many stages, each stage has its own fingerprint, the reveal lists them all', async () => {
+  const { scenarios, stagedLoad } = await (await fetch(`${base}/api/scenarios`)).json();
+  const q4 = scenarios.find((s) => s.id === 'q4-three-signals');
+  assert.equal(q4.stages, 3);
+  assert.ok(!JSON.stringify(q4).includes('withheld'), 'the card never says what a stage withholds');
+  assert.ok(stagedLoad.startOver.includes('onboard it again'), 'starting over says the application must be onboarded again');
+  assert.match(stagedLoad.noPublish, /Nothing is committed or pushed/);
+  const fp = async (q) => (await (await fetch(`${base}/api/fingerprint?scenario=q4-three-signals&anchor=2026-11-15${q}`)).json());
+  const prints = [await fp('&stage=1'), await fp('&stage=2'), await fp('&stage=3')];
+  assert.deepEqual(prints.map((p) => p.stage), [1, 2, 3]);
+  assert.equal(new Set(prints.map((p) => p.fingerprint)).size, 3);
+  assert.equal((await fetch(`${base}/api/fingerprint?scenario=q4-three-signals&anchor=2026-11-15&stage=4`)).status, 400);
+  assert.equal((await fetch(`${base}/api/fingerprint?scenario=steady-state&anchor=2026-11-15&stage=1`)).status, 400);
+  const reveal = await (await fetch(`${base}/api/scenarios/q4-three-signals/reveal?anchor=2026-11-15`)).json();
+  assert.deepEqual(reveal.stages.map((s) => s.fingerprint), prints.map((p) => p.fingerprint));
+  for (const s of reveal.stages) assert.equal(createHash('sha256').update(s.canonical).digest('hex'), s.fingerprint, `stage ${s.stage}: the sealed text gives the fingerprint`);
+  assert.equal((await (await fetch(`${base}/api/scenarios/steady-state/reveal?anchor=2026-11-15`)).json()).stages, undefined);
+});
+
+test('staged loads: out of order is refused before anything is touched; only the last stage publishes by default; the choice is per load; start over', async () => {
+  const load = async (body) => {
+    const res = await post('/api/actions/load', { scenario: 'q4-three-signals', anchor: '2026-11-15', pace: 'fast', token: await token('load'), ...body });
+    assert.equal(res.status, 202, JSON.stringify(await res.clone().json()));
+    return events((await res.json()).runId);
+  };
+  const loaded = async () => JSON.parse(await readFile(path.join(paths.stateDir, 'loaded.json'), 'utf8'));
+  // the request itself
+  assert.equal((await post('/api/actions/load', { scenario: 'q4-three-signals', stage: 7, token: await token('load') })).status, 400);
+  assert.equal((await post('/api/actions/load', { scenario: 'q4-three-signals', stage: 1, publish: 'yes', token: await token('load') })).status, 400);
+  assert.equal((await post('/api/actions/load', { scenario: 'steady-state', publish: false, token: await token('load') })).status, 400, 'publish is a choice of a staged load only');
+
+  aws.calls.length = 0;
+  git.calls.length = 0;
+  let list = await load({ stage: 2 });
+  assert.equal(list.at(-1).type, 'error');
+  assert.match(list.at(-1).message, /refusing to load: stage 2 adds to stage 1, and no stage of this scenario is loaded: load stage 1 first/);
+  assert.equal(writesIn(aws.calls).length, 0, 'refused before Clear');
+
+  git.setStatus([]);
+  git.setStaged([]);
+  list = await load({ stage: 1 });
+  assert.equal(list.at(-1).type, 'done', JSON.stringify(list.filter((e) => e.type === 'error')));
+  assert.deepEqual(list.filter((e) => e.type === 'step' && e.status === 'skipped').map((e) => e.step), ['publish']);
+  assert.ok(list.some((e) => e.type === 'note' && /stage 1 of 3 \(case 1\)/.test(e.message)));
+  assert.ok(!git.calls.some(([n]) => ['add', 'commit', 'push'].includes(n)), 'stage 1 does not publish by default');
+  const one = await loaded();
+  assert.deepEqual([one.scenario, one.stage, one.stages, one.anchor], ['q4-three-signals', 1, 3, '2026-11-15']);
+  const fp1 = (await (await fetch(`${base}/api/fingerprint?scenario=q4-three-signals&anchor=2026-11-15&stage=1`)).json()).fingerprint;
+  assert.equal(one.fingerprint, fp1, 'what is loaded is sealed by the stage-1 fingerprint');
+  assert.equal(aws.calls.filter(([n, b]) => n === 'put' && b === 'stack-state').length, 10, "Upload writes stage 1's starting state where LearnLoop reads it");
+
+  list = await load({ stage: 3 });
+  assert.match(list.at(-1).message, /stage 1 is loaded: load stage 2 before stage 3/);
+  list = await load({ stage: 2, anchor: '2026-11-16' });
+  assert.match(list.at(-1).message, /keeps the start date of the stages already loaded \(2026-11-15\)/);
+
+  // stage 2, with publishing asked for on this load
+  git.calls.length = 0;
+  list = await load({ stage: 2, publish: true });
+  assert.equal(list.at(-1).type, 'done', JSON.stringify(list.filter((e) => e.type === 'error')));
+  assert.ok(list.some((e) => e.type === 'step' && e.step === 'publish' && e.status === 'done'));
+  assert.ok(git.calls.some(([n]) => n === 'add'), 'publish ran because it was asked for');
+  assert.equal((await loaded()).stage, 2);
+
+  // stage 3 publishes by default, by fingerprint only
+  git.calls.length = 0;
+  git.setStatus([' M data/seed/carts.json']);
+  git.setStaged(['data/seed/carts.json']);
+  list = await load({ stage: 3 });
+  assert.equal(list.at(-1).type, 'done', JSON.stringify(list.filter((e) => e.type === 'error')));
+  const commit = git.calls.find(([n]) => n === 'commit');
+  assert.ok(commit, 'the last stage publishes');
+  const three = await loaded();
+  assert.equal(three.stage, 3);
+  assert.match(commit[1], new RegExp(`^Seed: load sealed scenario ${three.fingerprint.slice(0, 12)} anchored on 2026-11-15`));
+  assert.ok(!commit[1].includes('q4-three-signals') && !/stage/i.test(commit[1]), 'the commit message names neither the scenario nor the stage');
+  assert.ok(commit[1].trimEnd().endsWith(CO_AUTHOR));
+  assert.equal(three.published.commit, 'abc1234');
+
+  list = await load({ stage: 2 });
+  assert.match(list.at(-1).message, /stage 3 is already loaded.*start over with stage 1 and onboard the application in the Governance Agent again/);
+
+  // start over: stage 1 again, without publishing
+  git.calls.length = 0;
+  git.setStatus([]);
+  git.setStaged([]);
+  list = await load({ stage: 1, publish: false });
+  assert.equal(list.at(-1).type, 'done');
+  assert.ok(!git.calls.some(([n]) => n === 'add'));
+  assert.equal((await loaded()).stage, 1);
 });

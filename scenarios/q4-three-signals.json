@@ -44,6 +44,10 @@
     {
       "file": "packages/modules/new-evolution-opportunity/approach/eligibility.js",
       "threshold": "NBF-USAGE-ACTOR_INACTIVITY is an 'agentic_candidate' (inactivity_churn), so for each of the three the solution architect may propose an AI agent: a lesson reminder (progress.json: last_activity_at of the learners who stopped), a cart reminder (carts.json), and replies drafted for staff to approve (support_requests.json: the open questions, and the earlier answers to the same questions)."
+    },
+    {
+      "file": "backend/src/cadence.js (continueAfterTelemetryIngest: the earlier window is read once per application), packages/platform/telemetry/ingestion.js (route baselines exist only for routes with requests in the window read), packages/modules/new-evolution-opportunity/drift/usage.js (actorWindowsOf: the highest distinct-user count per window is kept), detectors.js (actorDropVerdict: a route needs two measured windows)",
+      "threshold": "The staged reveal (staged_reveal below). One 'Get usage telemetry' reads days -29..0 again; days -59..-30 are read only when the application is onboarded (GA_TELEMETRY_HISTORY_WINDOWS = 1, and a later read finds that history already read). So every stage carries the final traffic of days -60..-30, and withholds only the recent traffic of the routes whose drop is a later case. A withheld route then has one measured window (too_few_measured_windows, no finding) until its stage brings its recent window; the routes already revealed are byte for byte the same in every stage, so the agent's max-per-window merge keeps their numbers and the stage-1 finding keeps its fingerprint (one live finding per code and capability: duplicate_live). Checked with the agent's own observationsForGoal over baselines built from each stage, start dates on all seven weekdays: stage 1 raises only the lesson finding, stage 2 adds the enrol finding (earlier 298..311 -> recent 145..160), stage 3 adds the Help finding (290..307 -> 148..155); the cart write routes are withheld with enrolment so that no goal-trend observation about purchases appears before stage 2."
     }
   ],
   "parameters": {
@@ -136,5 +140,45 @@
         "persona": true
       }
     }
+  },
+  "staged_reveal": {
+    "recent_window_from_day": -29,
+    "why": "The presenter onboards LearnLoop once and reveals the three cases one at a time. The Governance Agent reads the earlier 30 days only when the application is onboarded and keeps the highest distinct-user count it has read for a window, so a stage may only add recent traffic, and the earlier 30 days must be final from the first stage on.",
+    "stages": [
+      {
+        "adds_case": 1,
+        "expected_new_finding": "One finding: about 42% fewer people open lessons in 'Course delivery and learner progress' (the lesson routes, 334 -> 193). Nothing about the store or Help yet.",
+        "recent_traffic_withheld": [
+          "POST /api/courses/{courseId}/enrol",
+          "POST /api/me/cart/items",
+          "DELETE /api/me/cart/items/{courseId}",
+          "GET /api/me/support-requests",
+          "POST /api/me/support-requests"
+        ],
+        "state_withheld": [
+          "carts",
+          "support_requests",
+          "support_reply_notifications"
+        ]
+      },
+      {
+        "adds_case": 2,
+        "expected_new_finding": "A second finding, the first one still there: about half as many people complete the enrolment step of the checkout in the catalog and purchase capability (POST /api/courses/{courseId}/enrol, 298..311 -> 145..160).",
+        "recent_traffic_withheld": [
+          "GET /api/me/support-requests",
+          "POST /api/me/support-requests"
+        ],
+        "state_withheld": [
+          "support_requests",
+          "support_reply_notifications"
+        ]
+      },
+      {
+        "adds_case": 3,
+        "expected_new_finding": "A third finding, the first two still there: about half as many people come back to the Help page in the capability that holds the learner notifications and Help (/api/me/support-requests, 290..307 -> 148..155).",
+        "recent_traffic_withheld": [],
+        "state_withheld": []
+      }
+    ]
   }
 }

@@ -12,7 +12,7 @@ import path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { uploadTargets } from '../stack.js';
 import { uploadObjects, uploadSets } from '../upload.js';
-import { getScenario, scenarioFingerprint } from '../scenarios.js';
+import { getScenario, scenarioFingerprint, stageOf } from '../scenarios.js';
 import { PLACEHOLDER_DISTRIBUTION_DOMAIN, PLACEHOLDER_DISTRIBUTION_ID } from '../generate.js';
 import { catalogIndex, cloudfrontSentence, eventSentence, requestSentence } from './feed.js';
 import { createRng } from '../rng.js';
@@ -111,6 +111,34 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
     return result;
   }
 
+  // ------------------------------------------------------------------ the stage order
+  // A staged scenario adds one case per load to ONE Governance Agent application, so a
+  // stage only makes sense on top of the one before, with the same start date (README,
+  // "Presenting the staged reveal"). Stage 1 is always allowed: it is also how the
+  // presenter starts over. Returns the reason a stage cannot be loaded now, or null.
+  async function stageOrderProblem(ctx) {
+    const stage = ctx.stage ?? null;
+    if (!stage || stage === 1) return null;
+    const loaded = await readJson(stateFile(false, 'loaded.json'));
+    if (!loaded || loaded.scenario !== ctx.scenario || !loaded.stage) {
+      return `stage ${stage} adds to stage ${stage - 1}, and no stage of this scenario is loaded: load stage 1 first`;
+    }
+    if (loaded.anchor !== ctx.anchor) {
+      return `stage ${stage} keeps the start date of the stages already loaded (${loaded.anchor}), not ${ctx.anchor}`;
+    }
+    if (loaded.stage < stage - 1) return `stage ${loaded.stage} is loaded: load stage ${loaded.stage + 1} before stage ${stage}`;
+    if (loaded.stage > stage) {
+      return `stage ${loaded.stage} is already loaded, and a stage never takes traffic away: to go back, start over with stage 1 and onboard the application in the Governance Agent again`;
+    }
+    return null;
+  }
+  async function checkStageOrder(ctx) {
+    const problem = await stageOrderProblem(ctx);
+    if (!problem) return;
+    if (!ctx.dryRun) throw new ActionError(`refusing to load: ${problem}`);
+    ctx.emit({ type: 'note', message: `Dry run: a real load would refuse here (${problem}).` });
+  }
+
   // ------------------------------------------------------------------ generate
   function runWorker(workerData) {
     return new Promise((resolve, reject) => {
@@ -124,6 +152,8 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
   async function generate(ctx) {
     const def = scenarios(ctx.scenario);
     const anchor = ctx.anchor;
+    const st = stageOf(def, ctx.stage ?? null);
+    if (!ctx.chain) await checkStageOrder(ctx);
     const targets = await targetsFor(ctx, { allowFallback: ctx.dryRun });
     let salt;
     if (targets.placeholder) {
@@ -137,12 +167,17 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
         salt = DRY_RUN_SALT;
       }
     }
-    const fingerprint = scenarioFingerprint(def, { seed: SEED, anchor });
-    ctx.emit({ type: 'note', message: `Generating 60 days of activity before ${anchor}.` });
+    const fingerprint = scenarioFingerprint(def, { seed: SEED, anchor, stage: st?.stage ?? null });
+    ctx.emit({
+      type: 'note',
+      message: st
+        ? `Generating 60 days of activity before ${anchor}: stage ${st.stage} of ${st.count} (case${st.stage > 1 ? `s 1 to ${st.stage}` : ' 1'}).`
+        : `Generating 60 days of activity before ${anchor}.`,
+    });
     const dataDir = dataDirFor(ctx.dryRun);
     const outDir = outDirFor(ctx.dryRun);
     const out = await runWorker({
-      options: { scenario: def.id, anchor, salt, seed: SEED, distributionId: targets.distributionId, distributionDomain: targets.distributionDomain },
+      options: { scenario: def.id, stage: st?.stage ?? null, anchor, salt, seed: SEED, distributionId: targets.distributionId, distributionDomain: targets.distributionDomain },
       dataDir, outDir,
     });
     const paceMs = Math.max(0, Math.min(MAX_PACE_MS, ctx.paceMs ?? DEFAULT_PACE_MS));
@@ -162,12 +197,12 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
       if (perDay > 0) await sleep(perDay);
     }
     const record = {
-      scenario: def.id, anchor, seed: SEED, fingerprint, at: now().toISOString(), dryRun: !!ctx.dryRun,
+      scenario: def.id, stage: st?.stage ?? null, stages: st?.count ?? null, anchor, seed: SEED, fingerprint, at: now().toISOString(), dryRun: !!ctx.dryRun,
       distributionId: targets.distributionId, elapsedMs: out.elapsedMs, counts: out.counts, dataDir, outDir,
     };
     await writeJson(stateFile(ctx.dryRun, 'generated.json'), record);
     await writeJson(stateFile(ctx.dryRun, 'last-run.json'), { ...record, daily: out.stats.daily, feed: out.feed });
-    return { scenario: def.id, anchor, fingerprint, elapsedMs: out.elapsedMs, counts: out.counts };
+    return { scenario: def.id, stage: st?.stage ?? null, anchor, fingerprint, elapsedMs: out.elapsedMs, counts: out.counts };
   }
 
   // ------------------------------------------------------------------ upload
@@ -177,7 +212,7 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
     const targets = await targetsFor(ctx, { allowFallback: ctx.dryRun });
     if (!ctx.dryRun) {
       const manifest = await readJson(path.join(generated.outDir, 'manifest.json'));
-      if (!manifest || manifest.scenario !== generated.scenario || manifest.anchor !== generated.anchor) {
+      if (!manifest || manifest.scenario !== generated.scenario || manifest.anchor !== generated.anchor || (manifest.stage ?? null) !== (generated.stage ?? null)) {
         throw new ActionError('the generated files on disk do not match the last generation; run Generate again');
       }
       if (manifest.distributionId !== targets.distributionId) throw new ActionError(`the logs were generated for distribution ${manifest.distributionId}, the stack has ${targets.distributionId}; run Generate again`);
@@ -211,7 +246,8 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
     } else {
       counts = await uploadObjects({ targets, sets, put: aws.put, onProgress });
       await writeJson(stateFile(false, 'loaded.json'), {
-        scenario: generated.scenario, anchor: generated.anchor, seed: generated.seed, fingerprint: generated.fingerprint,
+        scenario: generated.scenario, stage: generated.stage ?? null, stages: generated.stages ?? null,
+        anchor: generated.anchor, seed: generated.seed, fingerprint: generated.fingerprint,
         at: now().toISOString(), by: ctx.chain ? 'load' : 'upload', counts, published: null,
       });
     }
@@ -331,9 +367,21 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
   }
 
   // ------------------------------------------------------------------ load: all five
+  // `ctx.publish` (a staged load): whether the last step runs. By default only the last
+  // stage publishes — see publishByDefault().
   async function load(ctx) {
+    const def = scenarios(ctx.scenario);
+    const st = stageOf(def, ctx.stage ?? null);
+    await checkStageOrder(ctx);
+    const doPublish = ctx.publish ?? publishByDefault(st);
     const results = {};
     for (const [name, fn] of [['clear', clear], ['generate', generate], ['upload', upload], ['verify', verify], ['publish', publish]]) {
+      if (name === 'publish' && !doPublish) {
+        ctx.emit({ type: 'step', step: name, status: 'skipped' });
+        ctx.emit({ type: 'note', message: `Publishing the starting state was left out for stage ${st.stage} of ${st.count}. LearnLoop already reads this stage's starting state from AWS (Upload wrote it); main and LearnLoop's deploy stay as they are until the last stage.` });
+        results[name] = { skipped: true, reason: 'not_requested' };
+        continue;
+      }
       ctx.emit({ type: 'step', step: name, status: 'started' });
       results[name] = await fn({ ...ctx, chain: true });
       ctx.emit({ type: 'step', step: name, status: 'done' });
@@ -343,6 +391,24 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
 
   return { clear, generate, upload, verify, publish, load };
 }
+
+/**
+ * A staged load publishes only at the last stage unless asked otherwise. Publishing
+ * pushes data/seed to LearnLoop's main, which starts LearnLoop's production deploy, and
+ * its "Preview reset" restores the app's state from main: the earlier stages' state is
+ * already in AWS after Upload, so publishing them would only add deploys mid-demo.
+ * A scenario without stages publishes as before.
+ */
+export function publishByDefault(st) {
+  return !st || st.final;
+}
+
+/** What the confirmation says for a staged load, by whether it publishes, and for starting over. */
+export const STAGED_LOAD_WORDING = Object.freeze({
+  publish: "Clear the two log prefixes, generate this stage, upload and verify it, then commit and push data/seed/ to LearnLoop's main branch (which starts LearnLoop's deploy).",
+  noPublish: "Clear the two log prefixes, generate this stage, upload and verify it. Nothing is committed or pushed to LearnLoop.",
+  startOver: 'Load stage 1 again. The Governance Agent keeps the highest number of people it has read for every period, so an application that has already read a later stage would never show the drops again: after this, remove the LearnLoop application in the Governance Agent and onboard it again.',
+});
 
 /** Which actions change something outside this machine, and so need a confirmation token. */
 export const CONFIRMED_ACTIONS = Object.freeze({

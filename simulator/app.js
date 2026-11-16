@@ -6,10 +6,10 @@ const SVG = 'http://www.w3.org/2000/svg';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const shortDate = (iso) => { const d = new Date(`${iso.slice(0, 10)}T00:00:00Z`); return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`; };
 const longTime = (iso) => { const d = new Date(iso); return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}, ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
-const ACTION_LABELS = { clear: 'Clear old log files', generate: 'Generate', upload: 'Upload', verify: 'Verify', publish: 'Publish the starting state', load: 'Load this scenario' };
+const ACTION_LABELS = { clear: 'Clear old log files', generate: 'Generate', upload: 'Upload', verify: 'Verify', publish: 'Publish the starting state', load: 'Load this scenario', startOver: 'Start over with stage 1' };
 const TARGET_LABELS = { cloudfront: 'Web access records', appLogs: 'Application records', state: "The app's starting state" };
 
-const ui = { scenarios: [], selected: null, confirmations: {}, running: false, state: null };
+const ui = { scenarios: [], selected: null, confirmations: {}, stagedLoad: {}, running: false, state: null, defaultAnchor: null };
 
 // ------------------------------------------------------------------ helpers
 async function api(path, options = {}) {
@@ -60,16 +60,39 @@ function logLine(text, kind = '') {
 
 // ------------------------------------------------------------------ 1. scenario cards and the seal
 // A combined scenario leads, full width, with the cases it prepares drawn inside it as
-// numbered boxes (what changes, and for whom). One "Load this scenario" loads them all.
-function caseBoxes(cases) {
+// numbered boxes (what changes, and for whom). A staged one reveals them one load at a
+// time, and each box says whether its case is loaded, next, or not yet.
+const CASE_STATUS = { loaded: 'Loaded', next: 'Next', later: 'Not yet' };
+function caseBoxes(cases, statusOf = null) {
   const grid = el('div', { class: 'case-grid' });
-  cases.forEach((c, i) => grid.append(el('div', { class: 'case' },
-    el('span', { class: 'case-num', text: String(i + 1) }),
-    el('h4', { text: c.title }),
-    el('p', { text: c.what_changes }),
-    el('p', { class: 'case-who', text: c.who }))));
+  cases.forEach((c, i) => {
+    const status = statusOf ? statusOf(i + 1) : null;
+    grid.append(el('div', { class: status ? `case case-${status}` : 'case' },
+      el('span', { class: 'case-num', text: String(i + 1) }),
+      ...(status ? [el('span', { class: `case-status ${status}`, text: CASE_STATUS[status] })] : []),
+      el('h4', { text: c.title }),
+      el('p', { text: c.what_changes }),
+      el('p', { class: 'case-who', text: c.who })));
+  });
   return grid;
 }
+
+/**
+ * Where the selected scenario's staged reveal stands, from what is loaded now:
+ * { staged, count, loaded (0 = none of this scenario), next (stage to load, null when all
+ * are), anchor (the start date the stages keep, or null) }.
+ */
+function stagePlan() {
+  const card = ui.scenarios.find((s) => s.id === ui.selected);
+  const count = card?.stages ?? 0;
+  if (!count) return { staged: false, count: 0, loaded: 0, next: null, anchor: null };
+  // a rehearsal advances through the stages on its own record, never the real one
+  const l = dryRun() ? ui.state?.dryRunGenerated : ui.state?.loaded;
+  const loaded = l && l.scenario === ui.selected && l.stage ? l.stage : 0;
+  return { staged: true, count, loaded, next: loaded >= count ? null : loaded + 1, anchor: loaded ? l.anchor : null };
+}
+/** The stage the buttons act on: the next one, or the last one when all are loaded. */
+const actionStage = (plan = stagePlan()) => (plan.staged ? plan.next ?? plan.count : null);
 
 function renderCards() {
   const host = $('#cards');
@@ -77,11 +100,16 @@ function renderCards() {
   const featured = ui.scenarios.filter((s) => s.cases?.length);
   const others = ui.scenarios.filter((s) => !s.cases?.length);
   const card = (s, isFeatured) => {
+    const plan = s.id === ui.selected ? stagePlan() : null;
+    const statusOf = s.stages && plan?.staged
+      ? (n) => (n <= plan.loaded ? 'loaded' : n === plan.next ? 'next' : 'later')
+      : null;
+    const countText = s.stages ? `${s.cases.length} cases, revealed one stage at a time` : `${s.cases?.length} cases, loaded together with one button`;
     const node = el('button', { type: 'button', class: isFeatured ? 'card featured' : 'card', role: 'radio', 'aria-checked': String(s.id === ui.selected) },
-      ...(isFeatured ? [el('span', { class: 'case-count', text: `${s.cases.length} cases, loaded together with one button` })] : []),
+      ...(isFeatured ? [el('span', { class: 'case-count', text: countText })] : []),
       el('h3', { text: s.title }), el('p', { text: s.description }),
-      ...(isFeatured ? [caseBoxes(s.cases)] : []));
-    node.addEventListener('click', () => { ui.selected = s.id; renderCards(); updateFingerprint(); });
+      ...(isFeatured ? [caseBoxes(s.cases, statusOf)] : []));
+    node.addEventListener('click', () => { ui.selected = s.id; renderCards(); renderStageControls(); updateFingerprint(); });
     return node;
   };
   // While a combined scenario exists it is the only one shown; the single-signal
@@ -94,14 +122,16 @@ function renderCards() {
     download.toggleAttribute('aria-disabled', !ui.selected);
   }
 }
-async function updateFingerprint() {
+const shownKey = (scenario, when, stage) => `${scenario}|${when}${stage ? `|${stage}` : ''}`;
+async function updateFingerprint(stageOverride = null) {
   const box = $('#fingerprint');
   if (!ui.selected || !anchor()) { box.textContent = '—'; return; }
+  const stage = stageOverride ?? actionStage();
   try {
-    const { fingerprint } = await api(`/api/fingerprint?scenario=${encodeURIComponent(ui.selected)}&anchor=${anchor()}`);
-    box.replaceChildren(el('span', { class: 'label', text: 'Fingerprint (SHA-256)' }), document.createTextNode(grouped(fingerprint)));
+    const { fingerprint } = await api(`/api/fingerprint?scenario=${encodeURIComponent(ui.selected)}&anchor=${anchor()}${stage ? `&stage=${stage}` : ''}`);
+    box.replaceChildren(el('span', { class: 'label', text: stage ? `Fingerprint of stage ${stage} (SHA-256)` : 'Fingerprint (SHA-256)' }), document.createTextNode(grouped(fingerprint)));
     const shown = JSON.parse(sessionStorage.getItem('shown') ?? '{}');
-    shown[`${ui.selected}|${anchor()}`] = { fingerprint, at: new Date().toISOString() };
+    shown[shownKey(ui.selected, anchor(), stage)] = { fingerprint, at: new Date().toISOString() };
     sessionStorage.setItem('shown', JSON.stringify(shown));
   } catch (error) {
     box.textContent = error.message;
@@ -120,8 +150,10 @@ async function refreshLoaded({ readBack = false } = {}) {
       strip.append(document.createTextNode('Nothing has been loaded into AWS from this computer yet.'));
     } else {
       const title = ui.scenarios.find((s) => s.id === l.scenario)?.title ?? l.scenario;
+      const stageText = l.stage ? ` · stage ${l.stage} of ${l.stages ?? '?'} (case${l.stage > 1 ? `s 1 to ${l.stage}` : ' 1'})` : '';
       strip.append(
         document.createTextNode('Loaded now: '), el('strong', { text: title }),
+        ...(stageText ? [el('strong', { class: 'loaded-stage', text: stageText })] : []),
         document.createTextNode(` · start date ${l.anchor} · loaded ${longTime(l.at)} by “${ACTION_LABELS[l.by] ?? l.by}” · `),
         document.createTextNode(l.published ? (l.published.skipped ? 'starting state already on LearnLoop main' : `starting state published ${longTime(l.published.at)} (${l.published.commit})`) : 'starting state not published yet'),
       );
@@ -139,53 +171,129 @@ async function refreshLoaded({ readBack = false } = {}) {
   }
 }
 
+// ------------------------------------------------------------------ the staged reveal controls
+// One primary button per stage, the publish choice (only the last stage publishes by
+// default), what to do in the Governance Agent afterwards, and Start over.
+function renderStageControls() {
+  const plan = stagePlan();
+  const controls = $('#stage-controls');
+  const button = $('#load');
+  const next = $('#next-step');
+  controls.hidden = !plan.staged;
+  next.hidden = !plan.staged;
+  const anchorInput = $('#anchor');
+  if (!plan.staged) {
+    button.textContent = 'Load this scenario';
+    button.dataset.stage = '';
+    $('#load-hint').textContent = "Clears the old log files, generates the new activity, uploads it, reads it back and publishes the app's starting state. One confirmation.";
+    anchorInput.disabled = false;
+    $('#stage-anchor-note').hidden = true;
+    return;
+  }
+  const stage = actionStage(plan);
+  button.dataset.stage = String(stage);
+  button.textContent = plan.next ? `Load stage ${plan.next} — adds case ${plan.next}` : `All ${plan.count} stages are loaded`;
+  button.toggleAttribute('data-all-loaded', !plan.next);
+  if (!ui.running) button.disabled = !plan.next;
+  $('#load-hint').textContent = plan.next
+    ? `Clears the old log files, generates stage ${plan.next} of ${plan.count} (case${plan.next > 1 ? `s 1 to ${plan.next}` : ' 1'}), uploads it and reads it back${plan.next === plan.count ? ', then publishes the starting state' : ''}. One confirmation.`
+    : 'Every case is loaded. Start over below to present it again.';
+  // what the presenter does next in the Governance Agent
+  next.replaceChildren();
+  if (plan.next === 1) {
+    next.append(el('strong', { text: 'Then, in the Governance Agent: ' }), document.createTextNode('onboard LearnLoop as a new application (connecting usage telemetry reads the data), upload the business review and confirm its three goals. The first finding follows.'));
+  } else if (plan.next) {
+    next.append(el('strong', { text: 'Then, in the Governance Agent: ' }), document.createTextNode(`Settings → Connections → Usage telemetry → Get usage telemetry. Case ${plan.next}'s finding appears beside the earlier one${plan.next > 2 ? 's' : ''}.`));
+  } else {
+    next.append(el('strong', { text: 'In the Governance Agent: ' }), document.createTextNode('the three findings are there once the last read has finished.'));
+  }
+  // stages 2 and 3 keep the start date of stage 1
+  const note = $('#stage-anchor-note');
+  if (plan.loaded) {
+    anchorInput.value = plan.anchor;
+    anchorInput.disabled = true;
+    note.hidden = false;
+    note.textContent = plan.next
+      ? `The start date stays ${plan.anchor}, the one stage 1 was loaded with: a stage only adds to the activity already loaded.`
+      : `All ${plan.count} stages were loaded with the start date ${plan.anchor}. Start over loads stage 1 with today's date.`;
+  } else {
+    anchorInput.disabled = false;
+    note.hidden = true;
+  }
+  if (!ui.publishTouched || ui.publishFor !== stage) {
+    $('#publish').checked = stage === plan.count;
+    ui.publishFor = stage;
+    ui.publishTouched = false;
+  }
+  $('#start-over').hidden = !plan.loaded;
+}
+
 // ------------------------------------------------------------------ actions
-function confirmDialog(action) {
+function confirmDialog(action, text = null) {
   return new Promise((resolve) => {
     const dialog = $('#confirm');
     $('#confirm-title').textContent = `${ACTION_LABELS[action]}?`;
-    $('#confirm-text').textContent = ui.confirmations[action];
+    $('#confirm-text').textContent = text ?? ui.confirmations[action];
     $('#confirm-dry').hidden = !dryRun();
     dialog.addEventListener('close', () => resolve(dialog.returnValue === 'ok'), { once: true });
     dialog.showModal();
   });
 }
 
-async function runAction(action) {
+async function runAction(action, { startOver = false } = {}) {
   if (ui.running) return;
   if (!ui.selected) { logLine('Choose a scenario first.', 'error'); return; }
+  const plan = stagePlan();
+  const stage = startOver ? 1 : actionStage(plan);
+  const publish = plan.staged && action === 'load' ? (startOver ? false : $('#publish').checked) : undefined;
+  if (startOver) $('#anchor').value = ui.defaultAnchor ?? anchor();
+  let text = null;
+  if (plan.staged && action === 'load') {
+    text = startOver ? ui.stagedLoad.startOver
+      : `Stage ${stage} of ${plan.count}. ${publish ? ui.stagedLoad.publish : ui.stagedLoad.noPublish}`;
+  }
   let token;
   if (ui.confirmations[action]) {
-    if (!(await confirmDialog(action))) return;
+    if (!(await confirmDialog(startOver ? 'startOver' : action, text))) return;
     try {
       ({ token } = await api('/api/confirm', { method: 'POST', body: JSON.stringify({ action }) }));
     } catch (error) { logLine(error.message, 'error'); return; }
   }
+  if (startOver) await updateFingerprint(1); // the seal shows the stage being loaded
   let started;
   try {
-    started = await api(`/api/actions/${action}`, { method: 'POST', body: JSON.stringify({ scenario: ui.selected, anchor: anchor(), dryRun: dryRun(), token, pace: new URLSearchParams(location.search).get('pace') === 'fast' ? 'fast' : undefined }) });
+    started = await api(`/api/actions/${action}`, { method: 'POST', body: JSON.stringify({ scenario: ui.selected, stage: stage ?? undefined, anchor: anchor(), dryRun: dryRun(), publish, token, pace: new URLSearchParams(location.search).get('pace') === 'fast' ? 'fast' : undefined }) });
   } catch (error) { logLine(error.message, 'error'); return; }
   setRunning(true);
   ui.runDry = started.dryRun;
   $('#run-log').replaceChildren();
-  logLine(`${ACTION_LABELS[action]}${started.dryRun ? ' (rehearsal)' : ''}: started.`, 'note');
+  logLine(`${ACTION_LABELS[action]}${stage ? ` (stage ${stage})` : ''}${started.dryRun ? ' (rehearsal)' : ''}: started.`, 'note');
   follow(started.runId);
 }
 
 function setRunning(on) {
   ui.running = on;
-  for (const b of [...$$('[data-action]'), $('#load'), $('#replay')]) b.disabled = on;
+  for (const b of [...$$('[data-action]'), $('#load'), $('#replay'), $('#start-over')]) b.disabled = on;
+  if (!on && $('#load').hasAttribute('data-all-loaded')) $('#load').disabled = true;
+}
+/** After an action: what is loaded now, and everything that depends on it. */
+async function afterRun() {
+  await refreshLoaded();
+  renderCards();
+  renderStageControls();
+  await updateFingerprint();
 }
 
 function follow(runId) {
   const source = new EventSource(`/api/runs/${runId}/events`);
   source.onmessage = (message) => handleEvent(JSON.parse(message.data), source);
-  source.onerror = () => { source.close(); if (ui.running) { setRunning(false); refreshLoaded(); } };
+  source.onerror = () => { source.close(); if (ui.running) { setRunning(false); afterRun(); } };
 }
 
 function handleEvent(e, source) {
   switch (e.type) {
     case 'step':
+      if (e.status === 'skipped') logLine(`${ACTION_LABELS[e.step]}: left out.`, 'note');
       if (e.status === 'started') {
         logLine(`${ACTION_LABELS[e.step]}…`);
         if (e.step === 'generate') showMoment('generate');
@@ -213,11 +321,11 @@ function handleEvent(e, source) {
     case 'sample': showSample(e); break;
     case 'done':
       logLine(`${ACTION_LABELS[e.action]}: done.`, 'done');
-      source.close(); setRunning(false); refreshLoaded();
+      source.close(); setRunning(false); afterRun();
       break;
     case 'error':
       logLine(e.message, 'error');
-      source.close(); setRunning(false); refreshLoaded();
+      source.close(); setRunning(false); afterRun();
       break;
     default: break;
   }
@@ -368,10 +476,12 @@ async function openEnvelope() {
   const target = dryRun() ? ui.state?.dryRunGenerated ?? null : loaded;
   const scenario = target?.scenario ?? ui.selected;
   const when = target?.anchor ?? anchor();
+  const stage = target?.scenario === scenario ? target?.stage ?? null : null;
   try {
     const reveal = await api(`/api/scenarios/${scenario}/reveal?anchor=${when}`);
-    const recomputed = await sha256(canonicalJson({ anchor: reveal.anchor, scenario: reveal.definition, seed: reveal.seed }));
-    const shown = JSON.parse(sessionStorage.getItem('shown') ?? '{}')[`${scenario}|${when}`];
+    const sealed = { anchor: reveal.anchor, scenario: reveal.definition, seed: reveal.seed, ...(stage ? { stage } : {}) };
+    const recomputed = await sha256(canonicalJson(sealed));
+    const shown = JSON.parse(sessionStorage.getItem('shown') ?? '{}')[shownKey(scenario, when, stage)];
     const reference = shown?.fingerprint ?? target?.fingerprint ?? null;
     const box = $('#match');
     box.replaceChildren();
@@ -399,7 +509,13 @@ async function openEnvelope() {
       ? 'Checked in advance against the Governance Agent\'s own detection rules and thresholds (see Technical details).'
       : `Experimental: ${reveal.definition.experimental_reason}`;
     $('#reveal-verified').replaceChildren(...(reveal.definition.verified_against ?? []).map((v) => el('li', {}, el('code', { text: v.file }), document.createTextNode(` — ${v.threshold}`))));
-    $('#reveal-canonical').textContent = reveal.canonical;
+    $('#reveal-canonical').textContent = stage ? reveal.stages.find((x) => x.stage === stage).canonical : reveal.canonical;
+    // a staged scenario: every stage, its fingerprint, and which are loaded
+    $('#reveal-stages').hidden = !reveal.stages;
+    $('#reveal-stage-list').replaceChildren(...(reveal.stages ?? []).map((x) => el('li', { class: stage && x.stage <= stage ? 'stage-loaded' : '' },
+      el('strong', { text: `Stage ${x.stage}${stage ? (x.stage <= stage ? ' — loaded' : ' — not loaded') : ''}` }),
+      el('span', { class: 'fp', text: `Fingerprint: ${grouped(x.fingerprint)}${x.stage === stage ? (x.fingerprint === recomputed ? ' (the one loaded, recomputed above)' : ' (does not match the one recomputed above)') : ''}` }),
+      el('ul', {}, ...x.lines.map((t) => el('li', { text: t }))))));
     $('#envelope').hidden = false;
   } catch (error) {
     $('#match').className = 'match bad';
@@ -413,18 +529,23 @@ async function init() {
   for (const b of $$('.moments button')) b.addEventListener('click', () => showMoment(b.dataset.moment));
   for (const b of $$('[data-action]')) b.addEventListener('click', () => runAction(b.dataset.action));
   $('#load').addEventListener('click', () => runAction('load'));
+  $('#start-over').addEventListener('click', () => runAction('load', { startOver: true }));
+  $('#publish').addEventListener('change', () => { ui.publishTouched = true; });
   $('#replay').addEventListener('click', replay);
   $('#open-envelope').addEventListener('click', openEnvelope);
   $('#anchor').addEventListener('change', updateFingerprint);
-  $('#dry-run').addEventListener('change', () => { $('#dry-indicator').hidden = !dryRun(); });
-  const { scenarios, defaultAnchor, seed, confirmations } = await api('/api/scenarios');
+  $('#dry-run').addEventListener('change', () => { $('#dry-indicator').hidden = !dryRun(); renderCards(); renderStageControls(); updateFingerprint(); });
+  const { scenarios, defaultAnchor, seed, confirmations, stagedLoad } = await api('/api/scenarios');
   ui.scenarios = scenarios;
   ui.confirmations = confirmations;
+  ui.stagedLoad = stagedLoad ?? {};
+  ui.defaultAnchor = defaultAnchor;
   $('#seed').textContent = String(seed);
   $('#anchor').value = defaultAnchor;
   await refreshLoaded();
   ui.selected = ui.state?.loaded?.scenario ?? (scenarios.find((s) => s.cases?.length) ?? scenarios[0])?.id ?? null;
   renderCards();
+  renderStageControls();
   await updateFingerprint();
   drawChart();
   if (ui.state?.running) logLine(`'${ui.state.running.action}' is running from another window.`, 'note');

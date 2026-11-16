@@ -80,7 +80,81 @@ export function validateScenario(def) {
   const known = ['population', 'lapse', 'cancellations', 'slowdown', 'outage', 'carts', 'support'];
   const extra = Object.keys(p).filter((k) => !known.includes(k));
   if (extra.length) fail(id, `unknown parameters: ${extra.join(', ')} (the generator would silently ignore them)`);
+  validateStagedReveal(id, def);
   return def;
+}
+
+// ------------------------------------------------------------------ the staged reveal
+//
+// A combined scenario may be loaded in stages, one case at a time, into ONE Governance
+// Agent application (README, "Presenting the staged reveal"). Every stage is the SAME
+// generation (same anchor, seed and population) with part of it withheld:
+//
+//   recent_traffic_withheld  "METHOD /route" pairs whose requests are left out of the
+//                            logs from recent_window_from_day on (the window the agent
+//                            reads again at every "Get usage telemetry"). Their earlier
+//                            traffic stays: the agent reads the earlier window only once,
+//                            when the application is onboarded (its history read), so it
+//                            must already be the final one in stage 1.
+//   state_withheld           state documents written empty in that stage.
+//
+// The last stage withholds nothing, so it is the scenario's own output byte for byte.
+// Each later stage withholds a subset of the one before: a stage only ever ADDS traffic,
+// never removes any, because the agent keeps the highest distinct-user count it has read
+// for a window and could never see a drop that an earlier stage had already filled in.
+export const STATE_WITHHOLDABLE = Object.freeze(['carts', 'support_requests', 'support_reply_notifications']);
+const ROUTE_KEY = /^(GET|POST|PUT|PATCH|DELETE) \/api\/[A-Za-z0-9/{}_-]+$/;
+
+function validateStagedReveal(id, def) {
+  const r = def.staged_reveal;
+  if (r === undefined) return;
+  if (!r || typeof r !== 'object') fail(id, 'staged_reveal must be an object');
+  const extra = Object.keys(r).filter((k) => !['recent_window_from_day', 'why', 'stages'].includes(k));
+  if (extra.length) fail(id, `unknown staged_reveal keys: ${extra.join(', ')}`);
+  if (!inWindow(r.recent_window_from_day) || r.recent_window_from_day < -59) fail(id, 'staged_reveal.recent_window_from_day is a day inside -59..-1');
+  if (typeof r.why !== 'string' || r.why.length < 10) fail(id, 'staged_reveal.why must be a sentence');
+  if (!Array.isArray(def.cases) || !def.cases.length) fail(id, 'a staged reveal needs the cases it reveals');
+  if (!Array.isArray(r.stages) || r.stages.length !== def.cases.length) fail(id, 'staged_reveal.stages has one stage per case');
+  let previous = null;
+  r.stages.forEach((s, i) => {
+    const where = `staged_reveal.stages[${i}]`;
+    const keys = Object.keys(s ?? {}).filter((k) => !['adds_case', 'expected_new_finding', 'recent_traffic_withheld', 'state_withheld'].includes(k));
+    if (keys.length) fail(id, `unknown ${where} keys: ${keys.join(', ')}`);
+    if (s.adds_case !== i + 1) fail(id, `${where}.adds_case is ${i + 1}: stage n adds case n`);
+    if (typeof s.expected_new_finding !== 'string' || s.expected_new_finding.length < 10) fail(id, `${where}.expected_new_finding must be a sentence`);
+    if (!Array.isArray(s.recent_traffic_withheld) || s.recent_traffic_withheld.some((k) => !ROUTE_KEY.test(k))) fail(id, `${where}.recent_traffic_withheld lists "METHOD /api/route" pairs`);
+    if (!Array.isArray(s.state_withheld) || s.state_withheld.some((k) => !STATE_WITHHOLDABLE.includes(k))) fail(id, `${where}.state_withheld lists some of ${STATE_WITHHOLDABLE.join(', ')}`);
+    if (new Set(s.recent_traffic_withheld).size !== s.recent_traffic_withheld.length) fail(id, `${where}.recent_traffic_withheld repeats a route`);
+    if (previous) {
+      for (const k of s.recent_traffic_withheld) if (!previous.recent_traffic_withheld.includes(k)) fail(id, `${where} withholds ${k}, which the stage before showed: a stage may only add traffic`);
+      for (const k of s.state_withheld) if (!previous.state_withheld.includes(k)) fail(id, `${where} withholds ${k}, which the stage before wrote`);
+      if (s.recent_traffic_withheld.length === previous.recent_traffic_withheld.length) fail(id, `${where} reveals no traffic: each stage adds a case`);
+    }
+    previous = s;
+  });
+  const last = r.stages.at(-1);
+  if (last.recent_traffic_withheld.length || last.state_withheld.length) fail(id, 'the last stage withholds nothing: it is the whole scenario');
+}
+
+/** Number of stages of a staged scenario, or 0. */
+export const stageCount = (def) => def?.staged_reveal?.stages?.length ?? 0;
+
+/**
+ * One stage of a staged scenario, normalised for the generator: `null` for no stage (the
+ * whole scenario, as before stages existed). Throws for a stage the scenario does not have.
+ */
+export function stageOf(def, stage) {
+  if (stage === null || stage === undefined) return null;
+  const count = stageCount(def);
+  if (!count) throw new Error(`scenario ${def.id} has no stages`);
+  if (!Number.isInteger(stage) || stage < 1 || stage > count) throw new Error(`scenario ${def.id} has stages 1 to ${count}, not ${stage}`);
+  const s = def.staged_reveal.stages[stage - 1];
+  return {
+    stage, count, final: stage === count, addsCase: s.adds_case,
+    fromDay: def.staged_reveal.recent_window_from_day,
+    withheldRoutes: new Set(s.recent_traffic_withheld),
+    stateWithheld: new Set(s.state_withheld),
+  };
 }
 
 const isShare = (v) => typeof v === 'number' && v >= 0 && v <= 1;
@@ -179,12 +253,13 @@ export function canonicalJson(value) {
 }
 
 /** What is sealed: the whole definition plus the two other inputs that decide the output. */
-export function sealedInput(def, { seed, anchor }) {
-  return { anchor, scenario: def, seed };
+export function sealedInput(def, { seed, anchor, stage = null }) {
+  // a stage is a fourth input; without one the sealed text is what it always was
+  return stage === null || stage === undefined ? { anchor, scenario: def, seed } : { anchor, scenario: def, seed, stage };
 }
 
-export function scenarioFingerprint(def, { seed, anchor }) {
-  return createHash('sha256').update(canonicalJson(sealedInput(def, { seed, anchor }))).digest('hex');
+export function scenarioFingerprint(def, { seed, anchor, stage = null }) {
+  return createHash('sha256').update(canonicalJson(sealedInput(def, { seed, anchor, stage }))).digest('hex');
 }
 
 const dayWord = (d) => `${-d} day${d === -1 ? '' : 's'} before the start date`;
@@ -267,5 +342,35 @@ function plainSupport(s) {
 
 /** The card shown before the reveal: the title and the audience description only (no expected finding, no parameters). */
 export function publicCard(def) {
-  return { id: def.id, title: def.title, description: def.description, ...(def.cases ? { cases: def.cases } : {}) };
+  // `stages`: only how many, so the page can offer one button per case. Which traffic each
+  // stage withholds is part of the sealed definition and appears only in the reveal.
+  return {
+    id: def.id, title: def.title, description: def.description,
+    ...(def.cases ? { cases: def.cases } : {}),
+    ...(stageCount(def) ? { stages: stageCount(def) } : {}),
+  };
+}
+
+const STATE_WORDS = {
+  carts: 'the saved carts (carts.json) are empty',
+  support_requests: 'there are no support questions (support_requests.json is empty)',
+  support_reply_notifications: 'no learner has a reply notification from the team',
+};
+
+/** The staged reveal in plain sentences, one entry per stage. */
+export function plainStages(def) {
+  const r = def.staged_reveal;
+  if (!r) return [];
+  return r.stages.map((s, i) => {
+    const caseTitle = def.cases[s.adds_case - 1].title;
+    const lines = [`Stage ${i + 1} adds case ${s.adds_case}: ${caseTitle}.`];
+    if (s.recent_traffic_withheld.length) {
+      lines.push(`From ${-r.recent_window_from_day} days before the start date on, these requests are left out of the logs: ${s.recent_traffic_withheld.join(', ')}. Everything before that day is the same as in the last stage.`);
+    } else {
+      lines.push('Nothing is left out: this is the whole scenario, exactly as it is generated in one load.');
+    }
+    if (s.state_withheld.length) lines.push(`In the app's starting state ${s.state_withheld.map((k) => STATE_WORDS[k]).join(', and ')}.`);
+    lines.push(`Expected: ${s.expected_new_finding}`);
+    return { stage: i + 1, addsCase: s.adds_case, lines };
+  });
 }

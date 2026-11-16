@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// npm run seed -- [--scenario lapsed-learners] [--anchor YYYY-MM-DD] --salt <value> [--seed 42] [--data-dir <path>]
+// npm run seed -- [--scenario lapsed-learners] [--stage n] [--anchor YYYY-MM-DD] --salt <value> [--seed 42] [--data-dir <path>]
 //                 [--distribution-id E...] [--distribution-domain dxxxx.cloudfront.net]
 // Writes the mock state to <LearnLoop>/data/seed/ and 60 days of logs to ./out/.
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -7,7 +7,7 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { PLACEHOLDER_DISTRIBUTION_DOMAIN, PLACEHOLDER_DISTRIBUTION_ID, generate, todayUtc } from './generate.js';
 import { DATA_DIR, OUT_DIR, writeData, writeLogs } from './files.js';
-import { DEFAULT_SCENARIO, getScenario } from './scenarios.js';
+import { DEFAULT_SCENARIO, getScenario, stageOf } from './scenarios.js';
 
 export async function runSeed(options, { dataDir = DATA_DIR, outDir = OUT_DIR } = {}) {
   const result = generate(options);
@@ -16,6 +16,7 @@ export async function runSeed(options, { dataDir = DATA_DIR, outDir = OUT_DIR } 
   await mkdir(outDir, { recursive: true });
   await writeFile(path.join(outDir, 'manifest.json'), `${JSON.stringify({
     scenario: options.scenario ?? DEFAULT_SCENARIO,
+    stage: options.stage ?? null,
     anchor: options.anchor,
     seed: options.seed,
     salt: options.salt,
@@ -31,6 +32,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const { values } = parseArgs({
     options: {
       scenario: { type: 'string', default: DEFAULT_SCENARIO },
+      stage: { type: 'string' },
       anchor: { type: 'string', default: todayUtc() },
       salt: { type: 'string', default: process.env.LOG_PSEUDONYM_SALT },
       seed: { type: 'string', default: '42' },
@@ -43,14 +45,16 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.error('seed: --salt is required (the value of the learnloop/prod/log-pseudonym-salt secret)');
     process.exit(2);
   }
+  const stage = values.stage === undefined ? null : Number(values.stage);
   try {
-    getScenario(values.scenario);
+    stageOf(getScenario(values.scenario), stage);
   } catch (error) {
     console.error(`seed: ${error.message}`);
     process.exit(2);
   }
   const options = {
     scenario: values.scenario,
+    stage,
     anchor: values.anchor,
     salt: values.salt,
     seed: Number(values.seed),
@@ -59,7 +63,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   };
   const dataDir = path.resolve(values['data-dir']);
   const { stats, appLogs, cloudfront } = await runSeed(options, { dataDir });
-  console.log(`seed: scenario ${options.scenario}, anchor ${options.anchor}, seed ${options.seed}`);
+  console.log(`seed: scenario ${options.scenario}${stage ? ` (stage ${stage})` : ''}, anchor ${options.anchor}, seed ${options.seed}`);
   console.log(`seed: wrote ${dataDir}/*.json, ${appLogs.size} app log files and ${cloudfront.size} CloudFront log files to ${OUT_DIR}`);
   console.log(`seed: learners on lesson routes ${stats.window1.learnersOnLessons} (days -60..-31) and ${stats.window2.learnersOnLessons} (days -30..-1)`);
 }

@@ -8,12 +8,14 @@ This repository is kept separate from LearnLoop on purpose. The external analysi
 
 ```
 scenarios/*.json   one file per scenario: what the simulated learners do (data, never code)
+business-docs/     one quarterly business review per scenario (<scenario-id>.md), written as the business would
 src/scenarios.js   loads and validates scenarios; canonical JSON, the SHA-256 fingerprint, plain-words reveal
 src/model.js       behaviour model: population, cohorts, sessions, cancellations, renewals, releases, driven by a scenario
 src/emit.js        request stream -> CloudFront W3C files (gzipped, one per hour) and JSON Lines app logs
 src/generate.js    entry point and the statistics the tests (and the simulator page) read
 src/content.js     course catalog, lesson titles, quizzes, names, user agents, edge locations
-src/contract/      code copied from LearnLoop: pure logger builders + pseudonymisation, addMonths, completionPercent
+src/contract/      code copied from LearnLoop: pure logger builders + pseudonymisation, addMonths, completionPercent,
+                   the support reply target (replyDueAt), and actions.js: the lines each cart/support request writes
 src/cli.js         npm run seed
 src/upload.js      npm run seed:upload (and the upload sets the simulator shares)
 src/simulator/     npm run simulator: node:http server, SSE progress, actions, AWS and git layers, log-line sentences
@@ -21,7 +23,7 @@ simulator/         the page: index.html, app.js, styles.css (no libraries, no CD
 test/              generator, scenario and simulator checks, plus contract checks against ../LearnLoop
 ```
 
-`test/contract.test.js` compares the copies in `src/contract/` with the LearnLoop code. It runs when the LearnLoop repository, with `node_modules` installed, is at `../LearnLoop` or at `$LEARNLOOP_REPO`, and is skipped otherwise. Run it after any change to the LearnLoop logger.
+`test/contract.test.js` compares the copies in `src/contract/` with the LearnLoop code, and runs the real LearnLoop handlers for every row of `src/contract/actions.js` (cart read/add/remove, enrol, support list/ask, staff queue/reply, the daily `check_support_backlog` job) to check the event lines, their order before the request line, entity types, actors and route templates the generator writes. It runs when the LearnLoop repository, with `node_modules` installed, is at `../LearnLoop` or at `$LEARNLOOP_REPO`, and is skipped otherwise. Run it after any change to the LearnLoop logger or to those routes.
 
 ## Usage
 
@@ -41,7 +43,7 @@ npm run seed:upload
 
 `npm run seed` is deterministic: the same arguments produce byte-identical output. It writes:
 
-- `<LearnLoop>/data/seed/*.json` (override with `--data-dir`). Commit these in the LearnLoop repository.
+- `<LearnLoop>/data/seed/*.json` (override with `--data-dir`), including `carts.json` and `support_requests.json`. Commit these in the LearnLoop repository.
 - `out/cloudfront/<distribution-id>.<YYYY-MM-DD-HH>.<unique>.gz`, one file per hour for days −60 … −1.
 - `out/app-logs/service=<service>/dt=<date>/<service>-<date>-<HH>.log`, written only for hours that have traffic.
 - `out/manifest.json` (the scenario and the arguments, salt included) and `out/stats.json` (including `detectorWindows`, the numbers the Governance Agent's detectors compare, and a `daily` series). The `out/` directory is git-ignored.
@@ -69,14 +71,24 @@ Days −60 … −1 before the anchor date, with no missing hour. Every scenario
 - Renewals happen daily at 00:10 UTC (`actor_type: system`). Staff send about 3 messages a week, unevenly.
 - Health stays flat: 5xx below 0.3% per route per day, p95 about 120 ms on lesson routes and about 60 ms elsewhere, and a release every 10–14 days.
 - About 1% of requests come from Googlebot, on public pages only. Each learner has one stable IP from the documentation ranges.
+- **No cart or support traffic.** lapsed-learners predates the server-side cart and the Help page and must stay byte-identical (the digest test), and any new request would change every CloudFront file after it (the emitter draws its random fields per request). So its `carts.json` and `support_requests.json` are empty (`[]`), and no cart, support or backlog-check line is written. Its scenario file has no `carts`/`support` parameters, so its fingerprint is unchanged too.
+
+### Carts and support questions (every other scenario)
+
+`carts` and `support` are optional scenario parameters, each drawn from its own random streams (`carts`, `support`, `sessions-extra`, `ids-extra`), so a scenario without them produces exactly what it produced before they existed. The baseline that `steady-state`, `slow-lessons`, `outage-drop` (and the two new scenarios) use:
+
+- Every session loads the cart at sign-in (`GET /api/me/cart`, as the web app does).
+- A learner who has finished every course they are enrolled in gets the next one through the cart: course page, `POST /api/me/cart/items` (`cart_item_added`), then (85%) the checkout: two `GET /api/me/subscription`, one `POST /api/courses/{courseId}/enrol` per course in the cart (`course_enrolled`; enrolling takes the course out of the server cart without an event), `GET /api/me/cart`. Otherwise the course stays in the cart and the learner reviews lessons of a course they already have. A few courses are also put in the cart for later, revisited, or removed (`DELETE …/items/{courseId}`, `cart_item_removed`). About 8 learners end with something in their cart.
+- About 3 support questions a week (`GET` then `POST /api/me/support-requests`, `support_request_created`, entity `support_request`, topics billing / account / course_content / certificate / other). Staff answer from their Admin visits on weekdays in office hours (`GET /api/admin/support-requests`, `POST …/{requestId}/reply` with `notification_created` (system) then `support_reply_sent` (staff)); the reply is a `support_reply` inbox notification the learner later opens. Questions are answered the same day or the next morning.
+- The admin function's daily `check_support_backlog` job (07:00 UTC) writes one `kind: "log"` warning (`error.type` `SupportReplyTimeout`) per open question past one business day; in the baseline that is at most a few a week.
 
 ## Demo personas
 
 | Login | Id | Role | Behaviour |
 |---|---|---|---|
-| `ana.moreno@example.com` | `usr_a7e3c1d90b42` | learner (cohort B) | Enrolled only in Cloud Foundations, at 35% (3 of 8 lessons, weighted by duration). Last lesson activity on day −33. Signs in every few days afterwards and has no unread notifications. |
-| `marco.bellini@example.com` | `usr_5d81f0c3a9e6` | learner (cohort A) | Enrolled in SQL for Analysts and Serverless Applications. Last lesson on day −1. |
-| `sofia.lindqvist@example.com` | `usr_c4f2b7e1d038` | staff | Signs in on most weekdays. Turned on `new_catalog_filters` on day −51 (or the next weekday). |
+| `ana.moreno@example.com` | `usr_a7e3c1d90b42` | learner (cohort B) | Enrolled only in Cloud Foundations, at 35% (3 of 8 lessons, weighted by duration). Last lesson activity on day −33. Signs in every few days afterwards and has no unread notifications. In `slow-support-replies` she asked on day −5 whether she will get a certificate for Cloud Foundations (Help page); nobody has answered. |
+| `marco.bellini@example.com` | `usr_5d81f0c3a9e6` | learner (cohort A) | Enrolled in SQL for Analysts and Serverless Applications. Last lesson on day −1. In `abandoned-carts` he has Python for Data Work (day −16) and Data Visualization Fundamentals (day −9) in his cart and left the checkout page on day −9 without completing it. |
+| `sofia.lindqvist@example.com` | `usr_c4f2b7e1d038` | staff | Signs in on most weekdays. Turned on `new_catalog_filters` on day −51 (or the next weekday). Answers most learner questions (Admin → Support requests). |
 | `daniel.okafor@example.com`, `priya.nair@example.com` | generated | staff | Sign in on some weekdays and send some of the staff messages. |
 
 The password for every account is `learnloop-demo`.
@@ -94,6 +106,8 @@ The thresholds were read from the Governance Agent's detector code (`~/code/gove
 | `lapsed-learners` (default) | About six weeks before the start date, 145 learners stop opening lessons over two weeks but keep signing in; cancellations climb. | **NBF-USAGE-ACTOR_INACTIVITY** on part of "Course delivery and learner progress": distinct users on the lesson routes 340 → 195 (−43%, threshold `ACTOR_INACTIVITY_DROP_PCT` = 33, earlier window ≥ `MIN_INACTIVITY_ACTORS` = 200); health flat, so `incident_or_outage` is ruled out. | verified (detector code, and raised live on app `app_f41fb3ab2e5e`) |
 | `steady-state` | Nothing changes: same learners, same pace, healthy app, about 4 cancellations a week. | **No usage, drift or performance finding**: lesson users change < 1% (33), learning-route trend −2% (`TREND_FLAT_PCT` = 10), p95 ~120 ms (default budget p95 1000 ms / p99 2500 ms). Findings about the code itself are unaffected. | verified (detector code) |
 | `slow-lessons` | The first release on or after day −50 (it lands between −50 and −37) makes lesson routes slow: median 1.3 s; learners keep learning. | **COP-PERF-LATENCY_BUDGET** on the lesson routes (`packages/modules/code-optimization/performance.js`): p95 ~2.0 s in the earlier window and ~2.3 s in the recent one, over budget in **both** windows with ~20,000 latency samples (`MIN_LATENCY_SAMPLES` = 100) and complete baselines (60% / 30 observations); no usage finding. COP-PERF-REGRESSION is not expected (the earlier window is already slow). | verified (detector code) |
+| `abandoned-carts` | Learners keep putting their next course in the cart at the same pace, but from days −40 … −30 on, 40% of them stop completing the checkout; the courses stay in the cart and they review lessons they already have. | **NBF-USAGE-ACTOR_INACTIVITY** on part of the catalog/purchase capability: distinct client IPs on `POST /api/courses/{courseId}/enrol` 315 → 170 (−46%; 41–47% on all seven start weekdays; `ACTOR_INACTIVITY_DROP_PCT` = 33, earlier window ≥ `MIN_INACTIVITY_ACTORS` = 200), while `GET /api/me/cart` (−4%) and `POST /api/me/cart/items` (−4%) stay flat, so the route-level fallback names the enrol route; health flat, learning flat (progress/quiz routes about −15%, under 33). ACTOR_INACTIVITY is agentic-eligible (`approach/eligibility.js`); about 145 learners end with courses waiting in their cart. | verified (detector code) |
+| `slow-support-replies` | Questions rise from 3 to about 24 a week from day −42 (certificates, billing, account: about 80%), replies slow from about a day to about a week from day −40, and about 40 questions are open at the start date. | Target **NBF-DRIFT-GOAL_GAP** on "answer every learner question within one business day", measured from the application logs: the count of `SupportReplyTimeout` warnings per week (the daily backlog check) on the admin function's CloudWatch log route. Live only: the history in S3 cannot be used for this measure, so the measured week is the first complete ISO week after loading, about 230–280 warnings against a stated baseline of about 1 and a target of 0. See below for what the presenter must do. | experimental |
 | `outage-drop` | Days −32 … −24: 92% of lesson opens fail with a server error, learners retry 2–5 times; afterwards 56% of the active learners never open a lesson again; some cancel. | The honesty showcase. `incident_or_outage` is **confirmed** in both windows (server errors on the learning routes ~7–9% and ~28%, threshold `INCIDENT_ERROR_RATE_PCT` = 5), so **NBF-DRIFT-GOAL_TREND_NEGATIVE** (learning requests −34 to −39%, threshold 10%) is raised with the outage as its deterministic cause, and the **NBF-USAGE-ACTOR_INACTIVITY** candidate (progress route −43 to −48%) is withdrawn as `explained_by_confirmed_alternative` and listed in the detection report. | verified (detector code) |
 
 Dropped, with the reason:
@@ -101,16 +115,29 @@ Dropped, with the reason:
 - `unused-feature` (NBF-USAGE-CAPABILITY_DEAD / CAPABILITY_UNDERUSED). DEAD needs zero volume over a 90-day window, and a capability's series only starts at its first observed request, so with 60 days of history any capability that was ever used has volume > 0, and one never used has no baseline at all (`measured: false`, which the structural engine reports as uninstrumented, not as dead). UNDERUSED compares a capability's share with the serving weight a confirmed goal declares for it, which comes from the goal linking, not from the activity.
 - `enrolment-dropoff` (NBF-USAGE-JOURNEY_DROPOFF). A funnel exists only along `depends_on` edges between capabilities that the capability derivation (a model) draws, and retention is a ratio of whole-capability volumes; whether catalog browsing and enrolment are one capability or two, and whether the edge exists, is not something the activity decides.
 
+### Presenting the two cart and support scenarios
+
+**abandoned-carts.** Load it as usual on a fresh Governance Agent application. Upload `business-docs/abandoned-carts.md` (the simulator's "Download the business review" button) and confirm the goals, in particular *Complete the purchases learners start* (at least 300 learners completing a checkout every 30 days). Check that this goal is linked to the capability the agent derived for the catalog, cart and enrolment (it holds `POST /api/courses/{courseId}/enrol`); if the derivation put enrolment somewhere else, link that capability on the goal. The finding follows the telemetry read like lapsed-learners'. Demo persona: **Marco Bellini** (`marco.bellini@example.com`, password `learnloop-demo`), an active learner with Python for Data Work (added day −16) and Data Visualization Fundamentals (added day −9) in his cart; he opened the checkout page on day −9 and left. The AI agent the finding proposes can read `carts` for the other ~145 learners.
+
+**slow-support-replies (experimental).** Why: the agent's only measure over application logs is a count of log lines of one log route, filtered by level, error class or a parsed template (`packages/platform/business-data/source-binding.js`); it cannot pair `support_request_created` with `support_reply_sent`, compute a time between them or a ratio, and it does not see event names at all (`logEvent({ event })` is not a literal-message call site). LearnLoop's daily backlog check turns "waiting longer than one business day" into countable `SupportReplyTimeout` warnings. Those must be in CloudWatch Logs: the S3 `app-logs/` history is not usable (the bucket is a rank-4 candidate only, objects are chosen by LastModified and at most 100 are read per run, so every read is partial and measurement skips it). What the presenter does:
+
+1. Before the demo: LearnLoop `main` with the support feature must be deployed (the `learnloop-prod-check-support-backlog` EventBridge rule), and the scenario loaded **at least one morning before the last complete ISO week (Monday–Sunday) closes**: the check runs at 07:00 UTC and logs about 33–40 warnings a day for the loaded backlog (it keeps growing while nobody answers). Do not answer the open questions in Admin before the measurement.
+2. Onboard LearnLoop (telemetry role) and switch monitoring on. Start log-route detection (API only today: `POST /api/applications/:id/log-routes/detections`), wait for `aggregate_app_logs`, and check `GET …/log-routes`: the `/aws/lambda/learnloop-prod-admin` route must be `reachable` with parse coverage ≥ 80% (Lambda's own START/REPORT lines have no `level`; needs confirmation that coverage stays above the floor).
+3. Upload `business-docs/slow-support-replies.md` and confirm the goal *Answer every learner question within one business day*; check its metric (questions flagged as waiting longer than one business day, per week), direction (decrease), stated baseline (about 1 a week) and target (0 within 3 months), and that it is linked to the support capability.
+4. Goals & value → How goals are measured: pick the log option "number of log lines that learnloop-prod-admin writes … where the error class is SupportReplyTimeout, counted per week" and confirm it. Measurement and the goal-gap job then run on their own; the finding appears under Opportunities.
+
+Personas: **Sofia Lindqvist** (`sofia.lindqvist@example.com`, staff) answers most questions and sees the open queue under Admin → Support requests; **Ana Moreno** (`ana.moreno@example.com`) asked about a certificate for Cloud Foundations on day −5 and has no answer. If the path does not produce the gap, no other finding is expected from this behaviour: the support routes are too small for the usage detectors (fewer than 200 people), and nothing else changes.
+
 ### Before you load a different scenario
 
 - **The Governance Agent keeps every telemetry window it has read.** Distinct users of a window are kept as the maximum across the baselines read for it, and day counts merge "latest wins", so loading a second scenario on the same Governance Agent application mixes the two (for example `lapsed-learners` after `steady-state` keeps 340 users in the recent window and the inactivity finding does not fire). For a clean demo of a different scenario, onboard LearnLoop as a new application in the Governance Agent (or remove the old one) after loading it.
 - **Which window counts as "now".** The Governance Agent's history read writes the earlier window's baselines after the current one, and its health and latency checks read the newest baseline per route. `slow-lessons` and `outage-drop` are built so the condition holds in both windows, so the order does not matter.
-- **The business review in LearnLoop describes `lapsed-learners`.** `docs/business/q4-2026-business-review.md` (uploaded in the demo to create the goals) quotes the lapsed-learners figures and says there were no outages and page speed did not change. The goals it states are generic, but its narrative contradicts `slow-lessons` and `outage-drop`. Needs the owner's decision (a neutral version, or one per scenario kept outside LearnLoop).
+- **One business review per scenario.** `business-docs/<scenario-id>.md` is the quarterly review to upload in the demo (the simulator's "Download the business review for this scenario" button serves it as `learnloop-q4-2026-business-review.md`, a name that does not give the scenario away). `lapsed-learners.md` is a copy of LearnLoop's `docs/business/q4-2026-business-review.md`; `abandoned-carts.md` and `slow-support-replies.md` state the goal their finding links to; `steady-state.md`, `slow-lessons.md` and `outage-drop.md` are neutral: their own figures, no claim about speed or outages, and all four goals. The figures are for a start date of 15 November 2026.
 - **Late November.** The agent's calendar lists Black Friday / Cyber Monday (24 Nov – 2 Dec); with a start date in that range the market explanation cannot be ruled out, which lowers confidence but does not withdraw a finding.
 
 ## The Activity Simulator
 
-A local page for a live demo in front of a non-technical audience: the presenter picks a scenario, the page shows a sealed fingerprint of what the simulator is told, generates the activity day by day, shows where it lands in AWS, reads it back, and at the end opens the envelope and checks that the fingerprint still matches. No terminal, AWS console or file is needed during the demo.
+A local page for a live demo in front of a non-technical audience: the presenter picks a scenario (each card names the finding to expect; the parameters stay sealed), downloads its business review, the page shows a sealed fingerprint of what the simulator is told, generates the activity day by day, shows where it lands in AWS, reads it back, and at the end opens the envelope and checks that the fingerprint still matches. No terminal, AWS console or file is needed during the demo.
 
 ```bash
 npm ci

@@ -81,17 +81,17 @@ test('copied support rules match services/notifications/src/services/support.js'
 test('the actions the history uses log exactly what src/contract/actions.js says', { skip: !available && 'LearnLoop repository not found' }, async () => {
   const { ACTIONS, SUPPORT_REPLY_NOTIFICATION } = await import('../src/contract/actions.js');
   const testing = await load('packages/shared/src/testing.js');
-  const handlers = Object.fromEntries(await Promise.all(['catalog', 'notifications', 'admin'].map(async (s) => [s, (await load(`services/${s}/src/handler.js`)).handler])));
+  const handlers = Object.fromEntries(await Promise.all(['catalog', 'notifications', 'admin', 'learning'].map(async (s) => [s, (await load(`services/${s}/src/handler.js`)).handler])));
   const { IDS } = testing;
   const env = testing.setupTestEnvironment({ data: { ...testing.fixtureData(), carts: [] } });
   const learner = await testing.testSessionCookie({ userId: IDS.learner });
   const staff = await testing.testSessionCookie({ userId: IDS.staff, role: 'staff' });
-  const run = async (name, { cookie = learner, pathParameters, body } = {}) => {
+  const run = async (name, { cookie = learner, pathParameters, body, ok = 200 } = {}) => {
     const a = ACTIONS[name];
     env.logs.clear();
     const res = await handlers[a.service](testing.apiEvent(`${a.method} ${a.route}`, { cookie, pathParameters, body }));
     const records = env.logs.records;
-    assert.equal(res.statusCode, 200, `${name}: ${res.body}`);
+    assert.equal(res.statusCode, ok, `${name}: ${res.body}`);
     const events = records.filter((r) => r.kind === 'event');
     const requests = records.filter((r) => r.kind === 'request');
     assert.deepEqual(events.map((e) => ({ event: e.event, entityType: e['entity.type'], actorType: e.actor_type })), a.events, name);
@@ -120,6 +120,86 @@ test('the actions the history uses log exactly what src/contract/actions.js says
     assert.equal(replied.events[1]['entity.id'], requestId);
     const note = (await env.store.read('notifications')).find((n) => n.id === replied.events[0]['entity.id']);
     assert.deepEqual([note.type, note.title, note.link], [SUPPORT_REPLY_NOTIFICATION.type, SUPPORT_REPLY_NOTIFICATION.title, SUPPORT_REPLY_NOTIFICATION.link]);
+    // the staff's follow-up: look an employee up, send a reminder; the employee opens it
+    const training = await run('trainingLookup', { cookie: staff, pathParameters: { userId: IDS.learner } });
+    assert.ok(Array.isArray(training.body.assignments) && training.body.learner.organization);
+    const reminder = await run('staffMessage', { cookie: staff, pathParameters: { userId: IDS.learner }, body: { title: 'Reminder: complete "Cloud Foundations" by 20 Nov', body: 'Hi Lee, please finish the course.' } });
+    const reminderId = reminder.events[0]['entity.id'];
+    assert.equal(reminder.events[1]['entity.id'], reminderId, 'staff_message_sent names the notification');
+    const stored = (await env.store.read('notifications')).find((n) => n.id === reminderId);
+    assert.deepEqual([stored.type, stored.link, stored.read_at], ['staff_message', '/notifications', null]);
+    const read = await run('notificationRead', { pathParameters: { notificationId: reminderId } });
+    assert.equal(read.events[0]['entity.id'], reminderId);
+    const graded = await run('quizSubmit', { pathParameters: { lessonId: IDS.lesson3 }, body: { answers: { q1: 1, q2: 1 } } });
+    assert.equal(graded.events[0].value, 0);
+    await run('quizSubmit', { pathParameters: { lessonId: IDS.lesson3 }, body: { answers: { q1: 0, q2: 0 } } });
+    assert.equal((await env.store.read('quiz_results')).filter((q) => q.user_id === IDS.learner && q.lesson_id === IDS.lesson3).length, 2, 'a quiz can be taken again');
+  } finally {
+    env.logs.restore();
+  }
+});
+
+test('copied trainingState matches services/admin/src/services/training.js', { skip: !available && 'LearnLoop repository not found' }, async () => {
+  const copy = await import('../src/contract/training.js');
+  const app = await load('services/admin/src/services/training.js');
+  assert.deepEqual([...copy.TRAINING_STATUSES], [...app.TRAINING_STATUSES]);
+  const lessons = [{ id: 'l1', duration_min: 10, hasQuiz: false }, { id: 'l2', duration_min: 30, hasQuiz: true }, { id: 'l3', duration_min: 20, hasQuiz: true }];
+  const done = (id, at) => ({ lesson_id: id, status: 'completed', started_at: at, completed_at: at });
+  const quiz = (lesson, score, at) => ({ id: `q_${lesson}_${at}`, lesson_id: lesson, score, submitted_at: at });
+  const records = [
+    { lessons, progress: [], quizResults: [] },
+    { lessons, progress: [done('l1', '2026-11-01T10:00:00.000Z')], quizResults: [] },
+    { lessons, progress: [done('l1', '2026-11-01T10:00:00.000Z'), done('l2', '2026-11-02T10:00:00.000Z'), done('l3', '2026-11-03T10:00:00.000Z')], quizResults: [quiz('l2', 33, '2026-11-02T10:05:00.000Z'), quiz('l3', 100, '2026-11-03T10:05:00.000Z')] },
+    { lessons, progress: [done('l1', '2026-11-01T10:00:00.000Z'), done('l2', '2026-11-02T10:00:00.000Z'), done('l3', '2026-11-03T10:00:00.000Z')], quizResults: [quiz('l2', 33, '2026-11-02T10:05:00.000Z'), quiz('l2', 67, '2026-11-02T10:09:00.000Z'), quiz('l3', 100, '2026-11-03T10:05:00.000Z')] },
+    { lessons: [], progress: [], quizResults: [] },
+  ];
+  for (const pass of [60, 80]) {
+    for (const due of ['2026-10-31T23:59:59.000Z', '2026-11-02T23:59:59.000Z', '2026-11-30T23:59:59.000Z']) {
+      for (const record of records) {
+        for (const now of ['2026-11-01T12:00:00Z', '2026-11-20T12:00:00Z']) {
+          const a = { due_at: due, required_pass_score: pass };
+          assert.deepEqual(copy.trainingState(a, record, new Date(now)), app.trainingState(a, record, new Date(now)), `${pass} ${due} ${now}`);
+        }
+      }
+    }
+  }
+});
+
+/**
+ * The generated starting state, read by LearnLoop's own code: every state domain LearnLoop
+ * has is written, the employees' required training reads through the real staff route, and
+ * what it says is what the generator's statistics say.
+ */
+test('the compliance state reads through LearnLoop\'s training route as the generator counts it', { skip: !available && 'LearnLoop repository not found' }, async () => {
+  const { generate } = await import('../src/generate.js');
+  const { completeState } = await import('../src/files.js');
+  const { PERSONAS } = await import('../src/model.js');
+  const { EMPLOYEE_PERSONA } = await import('../src/compliance.js');
+  const { DOMAINS } = await load('packages/shared/src/store.js');
+  for (const id of ['q4-three-signals', 'steady-state']) {
+    assert.deepEqual(Object.keys(completeState(generate({ anchor: '2026-11-15', salt: 'test-salt', seed: 42, scenario: id }).data)).sort(), [...DOMAINS].sort(), `${id}: one document per LearnLoop state domain`);
+  }
+  const r = generate({ anchor: '2026-11-15', salt: 'test-salt', seed: 42, scenario: 'q4-three-signals', stage: 1 });
+  const testing = await load('packages/shared/src/testing.js');
+  const admin = (await load('services/admin/src/handler.js')).handler;
+  const env = testing.setupTestEnvironment({ data: r.data });
+  try {
+    const staff = await testing.testSessionCookie({ userId: PERSONAS.sofia.id, role: 'staff' });
+    const lena = r.data.users.find((u) => u.email === EMPLOYEE_PERSONA.email);
+    const res = await admin(testing.apiEvent('GET /api/admin/learners/{userId}/training', { cookie: staff, pathParameters: { userId: lena.id } }));
+    assert.equal(res.statusCode, 200, res.body);
+    const body = JSON.parse(res.body);
+    assert.equal(body.learner.name, EMPLOYEE_PERSONA.name);
+    assert.ok(body.assignments.some((a) => a.status === 'overdue'), 'Lena is overdue on a required course');
+    // the whole account, through the service: status counts as the generator's statistics give them
+    const { getLearnerTraining } = await load('services/admin/src/services/training.js');
+    const statuses = {};
+    for (const u of r.data.users.filter((x) => x.organization_id)) {
+      for (const a of (await getLearnerTraining(u.id, new Date(r.sim.anchorMs))).assignments) statuses[a.status] = (statuses[a.status] ?? 0) + 1;
+    }
+    assert.deepEqual(statuses, r.stats.compliance.statuses);
+    const list = JSON.parse((await admin(testing.apiEvent('GET /api/admin/learners', { cookie: staff, query: { organization: lena.organization_id } }))).body);
+    assert.ok(list.learners.length >= 50 && list.learners.every((l) => l.organization?.id === lena.organization_id));
   } finally {
     env.logs.restore();
   }

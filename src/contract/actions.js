@@ -12,6 +12,21 @@ export const ACTIONS = Object.freeze({
   supportList: { service: 'notifications', method: 'GET', route: '/api/me/support-requests', events: [] },
   supportAsk: { service: 'notifications', method: 'POST', route: '/api/me/support-requests', events: [{ event: 'support_request_created', entityType: 'support_request', actorType: 'learner' }] },
   supportQueue: { service: 'admin', method: 'GET', route: '/api/admin/support-requests', events: [] },
+  // the staff's follow-up of required training: look an employee up, send a reminder
+  trainingLookup: { service: 'admin', method: 'GET', route: '/api/admin/learners/{userId}/training', events: [] },
+  staffMessage: {
+    service: 'admin',
+    method: 'POST',
+    route: '/api/admin/learners/{userId}/message',
+    events: [
+      { event: 'notification_created', entityType: 'notification', actorType: 'system' },
+      { event: 'staff_message_sent', entityType: 'notification', actorType: 'staff' },
+      { event: 'email_sent', entityType: 'email', actorType: 'system' },
+    ],
+  },
+  // an employee opening a reminder, and retaking a quiz of a required course
+  notificationRead: { service: 'notifications', method: 'POST', route: '/api/me/notifications/{notificationId}/read', events: [{ event: 'notification_opened', entityType: 'notification', actorType: 'learner' }] },
+  quizSubmit: { service: 'learning', method: 'POST', route: '/api/lessons/{lessonId}/quiz', events: [{ event: 'quiz_submitted', entityType: 'lesson', actorType: 'learner' }] },
   supportReply: {
     service: 'admin',
     method: 'POST',

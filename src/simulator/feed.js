@@ -99,6 +99,7 @@ const ROUTE_PHRASES = Object.freeze({
   '/api/admin/flags': 'open the feature switches',
   '/api/admin/flags/{flagKey}': 'change a feature switch',
   '/api/admin/learners/{userId}/message': 'send a learner a message',
+  '/api/admin/learners/{userId}/training': "open an employee's required training",
   '/api/me/cart': "load the learner's cart",
   '/api/me/cart/items': 'put a course in the cart',
   '/api/me/cart/items/{courseId}': 'take a course out of the cart',

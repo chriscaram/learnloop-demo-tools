@@ -5,6 +5,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { runSeed } from '../cli.js';
 import { buildFeed } from './feed.js';
+import { completeState } from '../files.js';
 
 const started = Date.now();
 try {
@@ -17,7 +18,7 @@ try {
     elapsedMs,
     stats: result.stats,
     feed: [...feed.entries()],
-    counts: { stateDocuments: Object.keys(result.data).length, appLogFiles: result.appLogs.size, cloudfrontFiles: result.cloudfront.size, requests: result.sim.requests.length },
+    counts: { stateDocuments: Object.keys(completeState(result.data)).length, appLogFiles: result.appLogs.size, cloudfrontFiles: result.cloudfront.size, requests: result.sim.requests.length },
   });
 } catch (error) {
   parentPort.postMessage({ ok: false, message: error.message });

@@ -5,7 +5,10 @@ import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeStats, generate, INACTIVITY_BARS } from '../src/generate.js';
 import { completionPercent } from '../src/contract/progress.js';
-import { DAY_MS, HELP_PERSONA, PERSONAS, simulate } from '../src/model.js';
+import { DAY_MS, PERSONAS, simulate } from '../src/model.js';
+import { EMPLOYEE_PERSONA, FOLLOW_UP_SURGE, MANAGER_PERSONA, TRAINING_ROUTE } from '../src/compliance.js';
+import { formatJson } from '../src/files.js';
+import { createHash } from 'node:crypto';
 import {
   canonicalJson, getScenario, loadScenarios, plainParameters, publicCard, scenarioFingerprint, validateScenario,
 } from '../src/scenarios.js';
@@ -47,14 +50,21 @@ test('scenario files: valid, one per id, verified or experimental with reasons',
   assert.throws(() => validateScenario({ ...support, parameters: { ...support.parameters, support: { ...support.parameters.support, topicsAfter: { refunds: 1 } } } }), /topics/);
   assert.equal(getScenario('lapsed-learners').parameters.carts, undefined, 'lapsed-learners predates carts and support and keeps its definition (and fingerprint)');
   const three = getScenario('q4-three-signals');
-  const help = three.parameters.support.help;
-  const withHelp = (h) => ({ ...three, parameters: { ...three.parameters, support: { ...three.parameters.support, help: h } } });
-  assert.throws(() => validateScenario(withHelp({ ...help, visitShare: 1.5 })), /support.help.visitShare/);
-  assert.throws(() => validateScenario(withHelp({ ...help, giveUp: { ...help.giveUp, share: 2 } })), /support.help.giveUp/);
-  assert.throws(() => validateScenario(withHelp({ ...help, extra: 1 })), /unknown support.help parameters: extra/);
+  assert.throws(() => validateScenario({ ...three, parameters: { ...three.parameters, support: { ...three.parameters.support, help: {} } } }), /unknown support parameters: help/, 'the Help give-up case is gone');
+  const comp = three.parameters.compliance;
+  const withComp = (c) => ({ ...three, parameters: { ...three.parameters, compliance: c } });
+  assert.throws(() => validateScenario(withComp({ ...comp, extra: 1 })), /unknown compliance parameters: extra/);
+  assert.throws(() => validateScenario(withComp({ ...comp, requiredPassScore: 0 })), /requiredPassScore/);
+  assert.throws(() => validateScenario(withComp({ ...comp, organizations: [{ ...comp.organizations[0], courses: [{ course: 'nope', assignedDay: -40, dueDay: -10 }] }] })), /course is one of/);
+  assert.throws(() => validateScenario(withComp({ ...comp, organizations: [{ ...comp.organizations[0], courses: [{ course: 'sql', assignedDay: -10, dueDay: -40 }] }] })), /assignedDay < dueDay/);
+  assert.throws(() => validateScenario(withComp({ ...comp, organizations: [{ ...comp.organizations[0], teams: comp.organizations[0].teams.map((t) => ({ ...t, behind: false })) }] })), /behind and teams that are not/);
+  assert.throws(() => validateScenario(withComp({ ...comp, organizations: [...comp.organizations, comp.organizations[0]] })), /at most 300 employees/);
+  assert.throws(() => validateScenario(withComp({ ...comp, followUp: { ...comp.followUp, staffWeights: [1, 1] } })), /staffWeights/);
+  assert.throws(() => validateScenario(withComp({ ...comp, followUp: { ...comp.followUp, surgeFromDay: -20 } })), /surgeFromDay must be recent_window_from_day/);
+  assert.throws(() => validateScenario(withComp({ ...comp, quizRetry: { share: 0.5, maxRetries: 9 } })), /quizRetry/);
   assert.throws(() => validateScenario({ ...three, parameters: { ...three.parameters, lapse: null, cancellations: carts.parameters.cancellations } }), /lapsedAddPerBrowseSession needs a lapse/);
   for (const id of ['abandoned-carts', 'steady-state', 'slow-lessons', 'outage-drop']) {
-    assert.equal(getScenario(id).parameters.support.help, undefined, `${id} keeps its definition (no Help visits)`);
+    assert.equal(getScenario(id).parameters.compliance, undefined, `${id} keeps its definition (no enterprise accounts)`);
     assert.equal(getScenario(id).parameters.carts.lapsedAddPerBrowseSession, undefined, `${id} keeps its definition`);
   }
 });
@@ -257,18 +267,47 @@ test('abandoned-carts: the enrol route loses about 45% of its people while cart 
   assert.deepEqual(marco.items.map((i) => Math.floor((Date.parse(i.added_at) - r.sim.anchorMs) / DAY_MS)), [-16, -9]);
 });
 
-// q4-three-signals: three drops, each in the routes of a different LearnLoop service (one
+// The five single-signal scenarios at ANCHOR, seed 42, salt 'test-salt': every state
+// document, application log file and CloudFront object, digested BEFORE the compliance case
+// existed (commit 7d888e3). Adding it must leave them byte for byte as they were.
+const SINGLE_SIGNAL_DIGESTS = Object.freeze({
+  'lapsed-learners': '2e24b575c198a3ff96feda3bac54eb0d1c8db3b63563d29a3fc5b9b501767ee8',
+  'steady-state': 'ae1c9e73598a83d1db416224e7b76ead3f23641cc647cd40943ee9df89c86723',
+  'slow-lessons': '8e03398b4ccbd09a248e5867452bb79538fe6524cf3edfe5f0e8022f4086ef04',
+  'abandoned-carts': '54502f73c66b62d4c6b03437745cde0d9b11724185820b8b493b442bbf7ff6de',
+  'outage-drop': '7b1adb0d98bffc6c2ac4c21ac48c638b67fbae9a91d27c367e439ae22c5f676b',
+});
+
+test('the single-signal scenarios are byte for byte what they were before the compliance case', () => {
+  for (const [id, expected] of Object.entries(SINGLE_SIGNAL_DIGESTS)) {
+    const r = results.get(id);
+    const hash = createHash('sha256');
+    for (const [domain, value] of Object.entries(r.data)) hash.update(domain).update(formatJson(value));
+    for (const [key, body] of r.appLogs) hash.update(key).update(body);
+    for (const [key, body] of r.cloudfront) hash.update(key).update(body);
+    assert.equal(hash.digest('hex'), expected, id);
+    assert.equal(r.data.organizations, undefined, `${id}: no enterprise accounts in its data (written empty by writeData)`);
+    assert.equal(r.stats.compliance, null, id);
+  }
+});
+
+// q4-three-signals: two drops, each in the routes of a different LearnLoop service (one
 // service directory = one code component = one capability for the agent's route mapping),
-// checked for start dates on all seven weekdays. The detector names a capability's
-// qualifying route with the most earlier users, so each service must have exactly the
-// intended routes over the bars and everything else in it well under them.
+// and the compliance case, which no current detector reads. Checked for start dates on all
+// seven weekdays. The detector names a capability's qualifying route with the most earlier
+// users, so each service must have exactly the intended routes over the bars and
+// everything else in it well under them.
 const WEEK_OF_ANCHORS = ['2026-11-15', '2026-11-16', '2026-11-17', '2026-11-18', '2026-11-19', '2026-11-20', '2026-11-21'];
 const LESSON_ROUTE_SET = new Set(['/api/lessons/{lessonId}', '/api/courses/{courseId}/lessons', '/api/lessons/{lessonId}/progress', '/api/lessons/{lessonId}/quiz']);
+const q4Stats = new Map();
+const q4At = (anchor) => {
+  if (!q4Stats.has(anchor)) q4Stats.set(anchor, anchor === ANCHOR ? dv('q4-three-signals') : computeStats(simulate({ anchor, seed: 42, scenario: getScenario('q4-three-signals') }), { cloudfront: new Map(), appLogs: new Map() }));
+  return q4Stats.get(anchor);
+};
 
-test('q4-three-signals: lessons, enrolment and Help each lose about half of their people, in three different services, on all seven start weekdays', () => {
-  const def = getScenario('q4-three-signals');
+test('q4-three-signals: lessons and enrolment each lose about half of their people, Help stays ordinary, on all seven start weekdays', () => {
   for (const anchor of WEEK_OF_ANCHORS) {
-    const s = anchor === ANCHOR ? dv('q4-three-signals') : computeStats(simulate({ anchor, seed: 42, scenario: def }), { cloudfront: new Map(), appLogs: new Map() });
+    const s = q4At(anchor);
     const c = s.capabilities;
     const route = (svc, r) => c[svc].routes[r];
     // 1. learning: the lesson routes, not the dashboard read every visitor makes
@@ -283,13 +322,10 @@ test('q4-three-signals: lessons, enrolment and Help each lose about half of thei
     assert.ok(enrol.earlier >= 280 && enrol.dropPct >= 40, `${anchor}: enrol ${JSON.stringify(enrol)}`);
     assert.ok(route('catalog', '/api/me/cart/items').dropPct < 25, `${anchor}: cart adds ${route('catalog', '/api/me/cart/items').dropPct}`);
     for (const r of ['/api/me/cart', '/api/courses', '/api/courses/{courseId}']) assert.ok(Math.abs(route('catalog', r).dropPct) < 10, `${anchor}: ${r}`);
-    // 3. notifications: the Help route alone; the bell and the inbox stay flat
-    const help = route('notifications', '/api/me/support-requests');
-    assert.deepEqual(c.notifications.inactiveRoutes, ['/api/me/support-requests'], `${anchor}: notifications`);
-    assert.ok(help.earlier >= 270 && help.dropPct >= 40, `${anchor}: Help ${JSON.stringify(help)}`);
-    for (const r of ['/api/me/notifications/unread-count', '/api/me/notifications', '/api/me/notifications/{notificationId}/read']) {
-      assert.ok(route('notifications', r).dropPct < 20, `${anchor}: ${r} ${route('notifications', r).dropPct}`);
-    }
+    // 3. notifications: Help is an ordinary feature now; nothing in the service crosses a bar
+    assert.deepEqual(c.notifications.inactiveRoutes, [], `${anchor}: notifications`);
+    assert.ok((route('notifications', '/api/me/support-requests')?.earlier ?? 0) < INACTIVITY_BARS.minEarlierActors, `${anchor}: a few learners ask the team`);
+    assert.ok(s.support.weeks.every((w) => w.asked <= 8) && s.support.endState.overdueAtStart <= 2, `${anchor}: questions answered within about a day`);
     // the capability-level max hides each drop (the route-level fallback names it), and
     // nothing else crosses the bars: billing, identity, and admin (one office address)
     for (const svc of ['learning', 'catalog', 'notifications']) assert.ok(c[svc].serviceMax.dropPct < 10, `${anchor}: ${svc} max ${c[svc].serviceMax.dropPct}`);
@@ -299,44 +335,144 @@ test('q4-three-signals: lessons, enrolment and Help each lose about half of thei
     for (const svc of Object.values(c)) for (const pct of Object.values(svc.serverErrorPct)) assert.ok(pct < 0.5, `${anchor}: server errors ${pct}%`); // INCIDENT_ERROR_RATE_PCT = 5
     assert.ok(s.health.worst5xxShare < 0.005, `${anchor}: worst route-day ${s.health.worst5xxShare}`);
     assert.ok(s.health.lessonsP95.max < 200 && s.health.otherP95.max < 100, `${anchor}: latency flat`);
-    // the end state the three AI agents would work from
     assert.ok(s.carts.endState.learnersWithItems >= 120 && s.carts.endState.learnersWithItems <= 175, `${anchor}: ${s.carts.endState.learnersWithItems} learners with a waiting cart`);
-    const { open, overdueAtStart, openTopics } = s.support.endState;
-    assert.ok(open >= 15 && overdueAtStart >= open - 3, `${anchor}: ${open} open questions, ${overdueAtStart} overdue`);
-    const repetitive = (openTopics.certificate ?? 0) + (openTopics.billing ?? 0) + (openTopics.account ?? 0);
-    assert.ok(repetitive / open >= 0.85, `${anchor}: open questions are about the same few topics ${JSON.stringify(openTopics)}`);
-    const { earlier, recent } = s.support.windows;
-    assert.ok(earlier.answeredWithinTarget / earlier.asked >= 0.5 && recent.answeredWithinTarget <= 2, `${anchor}: answers slow down (${earlier.answeredWithinTarget}/${earlier.asked} -> ${recent.answeredWithinTarget}/${recent.asked})`);
-    assert.ok(earlier.medianReplyHours < 36 && recent.medianReplyHours > 24 * 7, `${anchor}: reply ${earlier.medianReplyHours} h -> ${recent.medianReplyHours} h`);
   }
 });
 
-test('q4-three-signals: personas (Ana lapsed, Marco with a waiting cart, Lena with an unanswered question, Sofia with an open queue)', () => {
+// Case 3, compliance training: the facts a future detector would read (docs/signal-spec.md),
+// with margin, on all seven start weekdays.
+test('q4-three-signals case 3: overdue training concentrated in some teams, the staff chasing by hand far more often, completion not improving', () => {
+  const def = getScenario('q4-three-signals');
+  const behindTeams = new Set(def.parameters.compliance.organizations.flatMap((o) => o.teams.filter((t) => t.behind).map((t) => `${o.name} | ${t.name}`)));
+  for (const anchor of WEEK_OF_ANCHORS) {
+    const k = q4At(anchor).compliance;
+    assert.ok(k.employees >= 200 && k.employees <= 260 && k.organizations === 3, `${anchor}: ${k.employees} employees`);
+    // state: overdue concentrated in the teams marked behind
+    for (const [team, t] of Object.entries(k.byTeam)) {
+      if (!t.dueByStart) continue;
+      if (behindTeams.has(team)) assert.ok(t.overduePct >= 45, `${anchor}: ${team} ${t.overduePct}% overdue`);
+      else assert.ok(t.overduePct <= 25, `${anchor}: ${team} ${t.overduePct}% overdue`);
+    }
+    const overdueAll = Object.values(k.byTeam).reduce((n, t) => n + t.overdue, 0);
+    const overdueBehind = Object.entries(k.byTeam).filter(([team]) => behindTeams.has(team)).reduce((n, [, t]) => n + t.overdue, 0);
+    assert.ok(overdueBehind / overdueAll >= 0.6, `${anchor}: ${overdueBehind} of ${overdueAll} overdue courses are in the behind teams`);
+    assert.ok(k.statuses.overdue >= 45, `${anchor}: ${k.statuses.overdue} overdue`);
+    const atRisk = Object.values(k.byOrganization).reduce((n, o) => n + o.atRisk, 0);
+    assert.ok(atRisk >= 40, `${anchor}: ${atRisk} at risk`);
+    // completion on time stays far from 95% and does not improve from one due date to the next
+    const past = Object.values(k.waves).filter((w) => w.dueDay < 0).sort((a, b) => a.dueDay - b.dueDay);
+    assert.equal(past.length, 3);
+    for (const w of past) assert.ok(w.onTimePct >= 45 && w.onTimePct <= 80, `${anchor}: on time ${w.onTimePct}%`);
+    assert.ok(past.at(-1).onTimePct <= past[0].onTimePct + 8, `${anchor}: completion does not improve ${past.map((w) => w.onTimePct)}`);
+    // logs: the staff's manual follow-up, about three times as much in the recent window
+    const { earlier, recent } = k.windows;
+    assert.ok(earlier.reminders >= 70 && recent.reminders >= 2.2 * earlier.reminders, `${anchor}: reminders ${earlier.reminders} -> ${recent.reminders}`);
+    assert.ok(recent.trainingLookups >= 2.2 * earlier.trainingLookups && recent.trainingLookups >= recent.reminders, `${anchor}: look-ups ${earlier.trainingLookups} -> ${recent.trainingLookups}`);
+    assert.ok(recent.reminders + earlier.reminders >= 300, `${anchor}: hundreds of reminders`);
+    assert.ok(recent.maxRemindersPerStaffWeek >= 30, `${anchor}: ${recent.maxRemindersPerStaffWeek} reminders by one person in one week`);
+    assert.ok(recent.reminderTitles <= 8 && recent.topTitleShare >= 15, `${anchor}: one template (${recent.reminderTitles} titles)`);
+    assert.deepEqual(recent.officeIps, ['203.0.113.10'], `${anchor}: from the office`);
+    // and the reminders do not bring the employees back: at most half are followed by any lesson
+    // activity on the course within 7 days, and tripling them does not raise that share
+    const followed = (w) => w.remindersFollowedByLessonIn7Days / w.reminders;
+    for (const w of [earlier, recent]) assert.ok(followed(w) <= 0.5, `${anchor}: ${w.remindersFollowedByLessonIn7Days} of ${w.reminders} followed by a lesson`);
+    assert.ok(followed(recent) <= followed(earlier) + 0.06, `${anchor}: followed by a lesson ${followed(earlier).toFixed(2)} -> ${followed(recent).toFixed(2)}`);
+    assert.ok(earlier.employeeFailedQuizAttempts + recent.employeeFailedQuizAttempts >= 25, `${anchor}: failed quiz attempts`);
+    // peaks before each due date: the busiest reminder day is within ten days before one
+    const dues = Object.values(k.waves).map((w) => w.dueDay);
+    const busiest = [...k.daily].sort((a, b) => b.reminders - a.reminders).slice(0, 5);
+    for (const d of busiest) assert.ok(dues.some((due) => d.day <= due + 21 && d.day >= due - 10), `${anchor}: day ${d.day} is near a due date`);
+  }
+});
+
+test('q4-three-signals: the compliance state agrees with the logs', () => {
   const r = results.get('q4-three-signals');
-  const { users, carts, support_requests: support, courses } = r.data;
-  const day = (iso) => Math.floor((Date.parse(iso) - r.sim.anchorMs) / DAY_MS);
-  const lena = users.find((u) => u.id === HELP_PERSONA.id);
-  assert.deepEqual([lena.email, lena.name, lena.role], [HELP_PERSONA.email, HELP_PERSONA.name, 'learner']);
+  const { users, training_assignments: assignments, organizations, notifications, quiz_results: quiz } = r.data;
+  const anchorMs = r.sim.anchorMs;
+  const employees = users.filter((u) => u.organization_id);
+  const byId = new Map(users.map((u) => [u.id, u]));
+  for (const u of employees) {
+    assert.ok(organizations.some((o) => o.id === u.organization_id));
+    assert.equal(typeof u.department, 'string');
+    if (u.manager_id) assert.equal(byId.get(u.manager_id).organization_id, u.organization_id, 'the manager works for the same account');
+    assert.deepEqual(Object.keys(u), ['id', 'email', 'name', 'role', 'created_at', 'organization_id', 'manager_id', 'department'], 'organisational fields only');
+  }
+  assert.ok(users.filter((u) => !u.organization_id).every((u) => Object.keys(u).length === 5));
+  for (const a of assignments) {
+    assert.ok(byId.get(a.user_id).organization_id === a.organization_id);
+    assert.deepEqual(Object.keys(a), ['id', 'organization_id', 'user_id', 'course_id', 'assigned_at', 'due_at', 'required_pass_score']);
+  }
+  // every quiz attempt in the window has its quiz_submitted line, and the other way round
+  const events = r.sim.requests.flatMap((q) => (q.events ?? []).map((e) => ({ ...e, userId: q.userId, route: q.route })));
+  const submitted = new Set(events.filter((e) => e.event === 'quiz_submitted').map((e) => `${e.userId}|${e.entityId}|${new Date(e.ts).toISOString()}`));
+  const inWindow = quiz.filter((q) => Date.parse(q.submitted_at) >= anchorMs - 60 * DAY_MS);
+  assert.equal(submitted.size, inWindow.length);
+  for (const q of inWindow) assert.ok(submitted.has(`${q.user_id}|${q.lesson_id}|${q.submitted_at}`), `a log line for quiz attempt ${q.id}`);
+  // every staff message is a notification, every opened one has its notification_opened
+  const sent = events.filter((e) => e.event === 'staff_message_sent').map((e) => e.entityId);
+  const staffMessages = notifications.filter((n) => n.type === 'staff_message' && Date.parse(n.created_at) >= anchorMs - 60 * DAY_MS);
+  assert.deepEqual([...sent].sort(), staffMessages.map((n) => n.id).sort());
+  const opened = new Map(events.filter((e) => e.event === 'notification_opened').map((e) => [e.entityId, new Date(e.ts).toISOString()]));
+  for (const n of staffMessages) assert.equal(n.read_at, opened.get(n.id) ?? null, `${n.id} read_at`);
+  // a training look-up is of an employee, always followed by that employee's reminder
   const staffIds = new Set(users.filter((u) => u.role === 'staff').map((u) => u.id));
-  const [invoice, certificate, ...more] = support.filter((q) => q.user_id === lena.id);
-  assert.equal(more.length, 0);
-  assert.deepEqual([invoice.topic, day(invoice.created_at), invoice.status], ['billing', -50, 'answered']);
-  assert.ok(staffIds.has(invoice.replies[0].staff_id));
-  assert.ok(Date.parse(invoice.answered_at) - Date.parse(invoice.created_at) < 3 * DAY_MS, 'her first question was answered promptly');
-  assert.deepEqual([certificate.topic, day(certificate.created_at), certificate.status, certificate.replies.length], ['certificate', -12, 'open', 0]);
-  const checks = r.sim.requests.filter((q) => q.userId === lena.id && q.method === 'GET' && q.route === '/api/me/support-requests').map((q) => Math.floor((q.ts - r.sim.anchorMs) / DAY_MS));
-  for (const d of [-9, -5, -2]) assert.ok(checks.includes(d), `Lena checks Help on day ${d}`);
-  assert.ok(!carts.some((c) => c.user_id === lena.id || c.user_id === PERSONAS.ana.id));
-  assert.ok(!support.some((q) => q.user_id === PERSONAS.ana.id), 'Ana keeps only her lapsed-learner script');
-  const titles = new Map(courses.map((c) => [c.id, c.title]));
-  assert.deepEqual(carts.find((c) => c.user_id === PERSONAS.marco.id).items.map((i) => titles.get(i.course_id)), ['Python for Data Work', 'Data Visualization Fundamentals']);
-  const sofiaReplies = support.flatMap((q) => q.replies).filter((x) => x.staff_id === PERSONAS.sofia.id).length;
-  assert.ok(sofiaReplies >= support.flatMap((q) => q.replies).length / 3, 'Sofia answers the largest share of questions');
-  assert.ok(support.filter((q) => q.status === 'open').length >= 15, 'Sofia finds an open queue in Admin');
-  // staff look at the queue and reply far less in the recent window
-  const staff = r.sim.requests.filter((q) => q.kind === 'api' && staffIds.has(q.userId));
-  const count = (rt, from, to) => staff.filter((q) => q.route === rt && day(new Date(q.ts).toISOString()) >= from && day(new Date(q.ts).toISOString()) <= to).length;
-  const reply = '/api/admin/support-requests/{requestId}/reply';
-  assert.ok(count(reply, -29, -1) < count(reply, -59, -30) / 2, 'fewer replies');
-  assert.ok(count('/api/admin/support-requests', -29, -1) < count('/api/admin/support-requests', -59, -30) * 0.75, 'the queue is opened less');
+  const lookups = r.sim.requests.filter((q) => q.route === TRAINING_ROUTE);
+  assert.ok(lookups.length >= 300);
+  for (const q of lookups) {
+    assert.ok(staffIds.has(q.userId) && q.ip === '203.0.113.10');
+    assert.ok(byId.get(q.path.split('/')[4]).organization_id, 'only employees are looked up');
+  }
+  // the sealed tag of the surge never reaches a log line or a state document
+  assert.ok(![...r.appLogs.values()].join('').includes(FOLLOW_UP_SURGE));
+  assert.ok(!JSON.stringify(r.data).includes(FOLLOW_UP_SURGE));
+});
+
+test('q4-three-signals: personas (Ana lapsed, Marco with a waiting cart, Lena overdue on required training, Tobias her manager, Sofia sending reminders)', () => {
+  for (const anchor of [ANCHOR, '2026-11-18', '2026-11-20']) {
+    const r = anchor === ANCHOR ? results.get('q4-three-signals') : generate({ anchor, salt: 'test-salt', seed: 42, scenario: 'q4-three-signals' });
+    const { users, carts, courses, training_assignments: assignments, notifications, organizations } = r.data;
+    const k = r.stats.compliance;
+    const lena = users.find((u) => u.email === EMPLOYEE_PERSONA.email);
+    const tobias = users.find((u) => u.email === MANAGER_PERSONA.email);
+    assert.deepEqual([lena.name, lena.role, tobias.name, tobias.role], [EMPLOYEE_PERSONA.name, 'learner', MANAGER_PERSONA.name, 'learner'], anchor);
+    assert.equal(lena.manager_id, tobias.id, `${anchor}: Tobias manages Lena`);
+    assert.equal(tobias.manager_id, null);
+    const team = `${organizations.find((o) => o.id === lena.organization_id).name} | ${lena.department}`;
+    assert.ok(k.byTeam[team].overduePct >= 45, `${anchor}: Lena's team ${team} is behind`);
+    const mine = k.byManager[MANAGER_PERSONA.name];
+    assert.ok(mine.overdue >= 3, `${anchor}: ${mine.overdue} overdue in Tobias's team`);
+    const lenaAssignments = assignments.filter((a) => a.user_id === lena.id);
+    assert.equal(lenaAssignments.length, 2);
+    const reminders = notifications.filter((n) => n.user_id === lena.id && n.type === 'staff_message' && /^(Reminder|Overdue)/.test(n.title));
+    assert.ok(reminders.length >= 3, `${anchor}: Lena has ${reminders.length} reminders`);
+    const lessonDays = r.sim.requests.filter((q) => q.userId === lena.id && q.route === '/api/me/progress').map((q) => Math.floor((q.ts - r.sim.anchorMs) / DAY_MS));
+    assert.ok(lessonDays.some((d) => d >= -7), `${anchor}: Lena still signs in`);
+    // Ana and Marco keep their scripts and are not employees
+    for (const id of [PERSONAS.ana.id, PERSONAS.marco.id]) assert.equal(users.find((u) => u.id === id).organization_id, undefined, anchor);
+    assert.ok(!notifications.some((n) => n.user_id === PERSONAS.ana.id && !n.read_at), `${anchor}: Ana has no unread notification`);
+    const titles = new Map(courses.map((c) => [c.id, c.title]));
+    assert.deepEqual(carts.find((c) => c.user_id === PERSONAS.marco.id).items.map((i) => titles.get(i.course_id)), ['Python for Data Work', 'Data Visualization Fundamentals'], anchor);
+    // Sofia sends most of the reminders
+    const byStaff = k.windows.recent.remindersByStaff;
+    assert.ok(byStaff['Sofia Lindqvist'] > byStaff['Daniel Okafor'] && byStaff['Sofia Lindqvist'] > byStaff['Priya Nair'], `${anchor}: ${JSON.stringify(byStaff)}`);
+  }
+});
+
+// Case 3 is a pass over the finished simulation with its own random streams. Without it,
+// the routes cases 1 and 2 are read from carry exactly the same people, and the end state
+// those cases rest on (progress, enrolments, carts) is the same.
+test('q4-three-signals: the compliance case changes nothing cases 1 and 2 are read from (all seven start weekdays)', () => {
+  const def = getScenario('q4-three-signals');
+  const without = { ...def, parameters: { ...def.parameters, compliance: null } };
+  const CASE_ROUTES = { learning: ['/api/lessons/{lessonId}', '/api/courses/{courseId}/lessons', '/api/lessons/{lessonId}/progress', '/api/me/progress'] };
+  for (const anchor of WEEK_OF_ANCHORS) {
+    const [a, b] = [def, without].map((d) => simulate({ anchor, seed: 42, scenario: d }));
+    const [ca, cb] = [a, b].map((sim) => computeStats(sim, { cloudfront: new Map(), appLogs: new Map() }).capabilities);
+    for (const r of CASE_ROUTES.learning) assert.deepEqual(ca.learning.routes[r], cb.learning.routes[r], `${anchor}: ${r}`);
+    assert.deepEqual(ca.catalog, cb.catalog, `${anchor}: every catalog route, the max and the inactive route`);
+    for (const domain of ['enrolments', 'progress', 'carts', 'courses', 'lessons', 'subscriptions']) assert.deepEqual(a.data[domain], b.data[domain], `${anchor}: ${domain}`);
+    // what it adds to learning is quiz retakes by employees: the same people, more attempts
+    assert.ok(ca.learning.routes['/api/lessons/{lessonId}/quiz'].recent >= cb.learning.routes['/api/lessons/{lessonId}/quiz'].recent);
+    assert.ok(a.data.quiz_results.length > b.data.quiz_results.length);
+  }
 });

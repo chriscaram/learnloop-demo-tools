@@ -322,7 +322,7 @@ test('staged loads: out of order is refused before anything is touched; only the
   assert.deepEqual([one.scenario, one.stage, one.stages, one.anchor], ['q4-three-signals', 1, 3, '2026-11-15']);
   const fp1 = (await (await fetch(`${base}/api/fingerprint?scenario=q4-three-signals&anchor=2026-11-15&stage=1`)).json()).fingerprint;
   assert.equal(one.fingerprint, fp1, 'what is loaded is sealed by the stage-1 fingerprint');
-  assert.equal(aws.calls.filter(([n, b]) => n === 'put' && b === 'stack-state').length, 10, "Upload writes stage 1's starting state where LearnLoop reads it");
+  assert.equal(aws.calls.filter(([n, b]) => n === 'put' && b === 'stack-state').length, 12, "Upload writes stage 1's starting state where LearnLoop reads it");
 
   list = await load({ stage: 3 });
   assert.match(list.at(-1).message, /stage 1 is loaded: load stage 2 before stage 3/);

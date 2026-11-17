@@ -13,6 +13,8 @@ import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { FOLLOW_UP_SURGE } from './compliance.js';
+import { COURSES } from './content.js';
 
 export const SCENARIOS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../scenarios');
 export const DEFAULT_SCENARIO = 'lapsed-learners';
@@ -76,8 +78,9 @@ export function validateScenario(def) {
   validateCarts(id, p.carts ?? null);
   if (p.carts?.lapsedAddPerBrowseSession !== undefined && p.lapse === null) fail(id, 'carts.lapsedAddPerBrowseSession needs a lapse');
   validateSupport(id, p.support ?? null);
-  // carts and support are optional: a scenario written before they existed has neither
-  const known = ['population', 'lapse', 'cancellations', 'slowdown', 'outage', 'carts', 'support'];
+  validateCompliance(id, p.compliance ?? null);
+  // carts, support and compliance are optional: a scenario written before they existed has none
+  const known = ['population', 'lapse', 'cancellations', 'slowdown', 'outage', 'carts', 'support', 'compliance'];
   const extra = Object.keys(p).filter((k) => !known.includes(k));
   if (extra.length) fail(id, `unknown parameters: ${extra.join(', ')} (the generator would silently ignore them)`);
   validateStagedReveal(id, def);
@@ -96,13 +99,19 @@ export function validateScenario(def) {
 //                            traffic stays: the agent reads the earlier window only once,
 //                            when the application is onboarded (its history read), so it
 //                            must already be the final one in stage 1.
-//   state_withheld           state documents written empty in that stage.
+//   recent_activity_withheld named parts of the activity (not whole routes) left out of the
+//                            logs from recent_window_from_day on: `training_follow_up_surge`
+//                            is the staff's follow-up above its earlier level
+//                            (compliance.followUp.surgeFromDay must be that same day).
+//   state_withheld           state documents (or the named part of one) written empty in
+//                            that stage.
 //
 // The last stage withholds nothing, so it is the scenario's own output byte for byte.
 // Each later stage withholds a subset of the one before: a stage only ever ADDS traffic,
 // never removes any, because the agent keeps the highest distinct-user count it has read
 // for a window and could never see a drop that an earlier stage had already filled in.
-export const STATE_WITHHOLDABLE = Object.freeze(['carts', 'support_requests', 'support_reply_notifications']);
+export const STATE_WITHHOLDABLE = Object.freeze(['carts', 'support_requests', 'support_reply_notifications', 'training_follow_up_surge_notifications']);
+export const ACTIVITY_WITHHOLDABLE = Object.freeze([FOLLOW_UP_SURGE]);
 const ROUTE_KEY = /^(GET|POST|PUT|PATCH|DELETE) \/api\/[A-Za-z0-9/{}_-]+$/;
 
 function validateStagedReveal(id, def) {
@@ -118,22 +127,31 @@ function validateStagedReveal(id, def) {
   let previous = null;
   r.stages.forEach((s, i) => {
     const where = `staged_reveal.stages[${i}]`;
-    const keys = Object.keys(s ?? {}).filter((k) => !['adds_case', 'expected_new_finding', 'recent_traffic_withheld', 'state_withheld'].includes(k));
+    const keys = Object.keys(s ?? {}).filter((k) => !['adds_case', 'expected_new_finding', 'recent_traffic_withheld', 'recent_activity_withheld', 'state_withheld'].includes(k));
     if (keys.length) fail(id, `unknown ${where} keys: ${keys.join(', ')}`);
     if (s.adds_case !== i + 1) fail(id, `${where}.adds_case is ${i + 1}: stage n adds case n`);
     if (typeof s.expected_new_finding !== 'string' || s.expected_new_finding.length < 10) fail(id, `${where}.expected_new_finding must be a sentence`);
     if (!Array.isArray(s.recent_traffic_withheld) || s.recent_traffic_withheld.some((k) => !ROUTE_KEY.test(k))) fail(id, `${where}.recent_traffic_withheld lists "METHOD /api/route" pairs`);
     if (!Array.isArray(s.state_withheld) || s.state_withheld.some((k) => !STATE_WITHHOLDABLE.includes(k))) fail(id, `${where}.state_withheld lists some of ${STATE_WITHHOLDABLE.join(', ')}`);
     if (new Set(s.recent_traffic_withheld).size !== s.recent_traffic_withheld.length) fail(id, `${where}.recent_traffic_withheld repeats a route`);
+    const activities = s.recent_activity_withheld ?? [];
+    if (!Array.isArray(activities) || activities.some((k) => !ACTIVITY_WITHHOLDABLE.includes(k)) || new Set(activities).size !== activities.length) {
+      fail(id, `${where}.recent_activity_withheld lists some of ${ACTIVITY_WITHHOLDABLE.join(', ')}, once each`);
+    }
+    if (activities.includes(FOLLOW_UP_SURGE) && def.parameters?.compliance?.followUp?.surgeFromDay !== r.recent_window_from_day) {
+      fail(id, `${where} withholds ${FOLLOW_UP_SURGE}: compliance.followUp.surgeFromDay must be recent_window_from_day`);
+    }
     if (previous) {
+      const before = previous.recent_activity_withheld ?? [];
       for (const k of s.recent_traffic_withheld) if (!previous.recent_traffic_withheld.includes(k)) fail(id, `${where} withholds ${k}, which the stage before showed: a stage may only add traffic`);
+      for (const k of activities) if (!before.includes(k)) fail(id, `${where} withholds ${k}, which the stage before showed: a stage may only add traffic`);
       for (const k of s.state_withheld) if (!previous.state_withheld.includes(k)) fail(id, `${where} withholds ${k}, which the stage before wrote`);
-      if (s.recent_traffic_withheld.length === previous.recent_traffic_withheld.length) fail(id, `${where} reveals no traffic: each stage adds a case`);
+      if (s.recent_traffic_withheld.length + activities.length === previous.recent_traffic_withheld.length + before.length) fail(id, `${where} reveals no traffic: each stage adds a case`);
     }
     previous = s;
   });
   const last = r.stages.at(-1);
-  if (last.recent_traffic_withheld.length || last.state_withheld.length) fail(id, 'the last stage withholds nothing: it is the whole scenario');
+  if (last.recent_traffic_withheld.length || (last.recent_activity_withheld ?? []).length || last.state_withheld.length) fail(id, 'the last stage withholds nothing: it is the whole scenario');
 }
 
 /** Number of stages of a staged scenario, or 0. */
@@ -153,6 +171,7 @@ export function stageOf(def, stage) {
     stage, count, final: stage === count, addsCase: s.adds_case,
     fromDay: def.staged_reveal.recent_window_from_day,
     withheldRoutes: new Set(s.recent_traffic_withheld),
+    withheldActivities: new Set(s.recent_activity_withheld ?? []),
     stateWithheld: new Set(s.state_withheld),
   };
 }
@@ -199,27 +218,55 @@ function validateSupport(id, s) {
     }
   }
   if (typeof s.personaQuestion !== 'boolean') fail(id, 'support.personaQuestion is true or false');
-  validateHelp(id, s.help);
-  const extra = Object.keys(s).filter((k) => !['perWeekBefore', 'perWeekAfter', 'rise', 'topicsBefore', 'topicsAfter', 'replyMedianHoursBefore', 'replyMedianHoursAfter', 'slowdown', 'replySpread', 'personaQuestion', 'help'].includes(k));
+  const extra = Object.keys(s).filter((k) => !['perWeekBefore', 'perWeekAfter', 'rise', 'topicsBefore', 'topicsAfter', 'replyMedianHoursBefore', 'replyMedianHoursAfter', 'slowdown', 'replySpread', 'personaQuestion'].includes(k));
   if (extra.length) fail(id, `unknown support parameters: ${extra.join(', ')}`);
 }
 
-// support.help is optional (a scenario written before it existed has none).
-const HELP_KEYS = ['visitShare', 'checkShare', 'giveUpAfterHours', 'visitShareGivenUp', 'giveUp', 'persona'];
-function validateHelp(id, h) {
-  if (h === undefined) return;
-  if (!h || typeof h !== 'object') fail(id, 'support.help must be an object when present');
-  for (const k of ['visitShare', 'checkShare', 'visitShareGivenUp']) if (!isShare(h[k])) fail(id, `support.help.${k} is a share between 0 and 1`);
-  if (!(typeof h.giveUpAfterHours === 'number' && h.giveUpAfterHours > 0 && h.giveUpAfterHours <= 24 * 30)) fail(id, 'support.help.giveUpAfterHours is 0..720 hours');
-  if (h.giveUp !== null) {
-    const g = h.giveUp ?? {};
-    if (!isSpan(g) || !isShare(g.share)) fail(id, 'support.help.giveUp needs fromDay <= toDay inside -60..-1 and a share, or is null');
-    const extraGiveUp = Object.keys(g).filter((k) => !['fromDay', 'toDay', 'share'].includes(k));
-    if (extraGiveUp.length) fail(id, `unknown support.help.giveUp parameters: ${extraGiveUp.join(', ')}`);
-  }
-  if (typeof h.persona !== 'boolean') fail(id, 'support.help.persona is true or false');
-  const extra = Object.keys(h).filter((k) => !HELP_KEYS.includes(k));
-  if (extra.length) fail(id, `unknown support.help parameters: ${extra.join(', ')}`);
+// compliance is optional (a scenario written before it existed has none): enterprise
+// accounts whose employees must complete required courses by a date (src/compliance.js).
+const COURSE_KEYS = COURSES.map((c) => c.key);
+const COMPLIANCE_KEYS = ['requiredPassScore', 'organizations', 'behindShare', 'quizRetry', 'followUp', 'personas'];
+const FOLLOW_UP_KEYS = ['daysBefore', 'daysAfter', 'chasePerDay', 'rampBoost', 'overduePerDay', 'minGapDays', 'readShare', 'surgeFromDay', 'staffWeights'];
+const unknownKeys = (o, keys) => Object.keys(o).filter((k) => !keys.includes(k));
+
+function validateCompliance(id, c) {
+  if (c === null) return;
+  if (!c || typeof c !== 'object') fail(id, 'compliance must be an object or null');
+  if (unknownKeys(c, COMPLIANCE_KEYS).length) fail(id, `unknown compliance parameters: ${unknownKeys(c, COMPLIANCE_KEYS).join(', ')}`);
+  if (!isInt(c.requiredPassScore) || c.requiredPassScore < 1 || c.requiredPassScore > 100) fail(id, 'compliance.requiredPassScore is a whole percentage 1..100');
+  if (!Array.isArray(c.organizations) || !c.organizations.length || c.organizations.length > 5) fail(id, 'compliance.organizations lists one to five accounts');
+  let total = 0;
+  c.organizations.forEach((o, i) => {
+    const where = `compliance.organizations[${i}]`;
+    if (unknownKeys(o ?? {}, ['name', 'employees', 'teams', 'courses']).length) fail(id, `unknown ${where} keys: ${unknownKeys(o, ['name', 'employees', 'teams', 'courses']).join(', ')}`);
+    if (typeof o.name !== 'string' || o.name.length < 3) fail(id, `${where}.name is the account's name`);
+    if (!isInt(o.employees) || o.employees < 2 || o.employees > 200) fail(id, `${where}.employees is 2..200`);
+    total += o.employees;
+    if (!Array.isArray(o.teams) || o.teams.length < 2 || o.teams.some((t) => typeof t?.name !== 'string' || typeof t.behind !== 'boolean' || unknownKeys(t, ['name', 'behind']).length)) {
+      fail(id, `${where}.teams lists at least two { name, behind } teams`);
+    }
+    if (!o.teams.some((t) => t.behind) || o.teams.every((t) => t.behind)) fail(id, `${where}.teams has teams that are behind and teams that are not`);
+    if (!Array.isArray(o.courses) || !o.courses.length || o.courses.length > 3) fail(id, `${where}.courses lists one to three required courses`);
+    for (const k of o.courses) {
+      if (!COURSE_KEYS.includes(k?.course)) fail(id, `${where}.courses: course is one of ${COURSE_KEYS.join(', ')}`);
+      if (!isInt(k.assignedDay) || !isInt(k.dueDay) || k.assignedDay < -200 || k.dueDay > 90 || k.dueDay <= k.assignedDay) fail(id, `${where}.courses: assignedDay < dueDay, within -200..90`);
+      if (unknownKeys(k, ['course', 'assignedDay', 'dueDay']).length) fail(id, `unknown ${where}.courses keys`);
+    }
+    if (new Set(o.courses.map((k) => k.course)).size !== o.courses.length) fail(id, `${where}.courses repeats a course`);
+  });
+  if (total > 300) fail(id, 'compliance: at most 300 employees in all (the learners are 420)');
+  if (!isShare(c.behindShare)) fail(id, 'compliance.behindShare is a share between 0 and 1');
+  const q = c.quizRetry ?? {};
+  if (!isShare(q.share) || !isInt(q.maxRetries) || q.maxRetries < 0 || q.maxRetries > 5 || unknownKeys(q, ['share', 'maxRetries']).length) fail(id, 'compliance.quizRetry needs share and maxRetries (0..5)');
+  const f = c.followUp ?? {};
+  if (unknownKeys(f, FOLLOW_UP_KEYS).length) fail(id, `unknown compliance.followUp parameters: ${unknownKeys(f, FOLLOW_UP_KEYS).join(', ')}`);
+  if (!isInt(f.daysBefore) || f.daysBefore < 1 || f.daysBefore > 30 || !isInt(f.daysAfter) || f.daysAfter < 0 || f.daysAfter > 60) fail(id, 'compliance.followUp.daysBefore is 1..30 and daysAfter 0..60');
+  for (const k of ['chasePerDay', 'overduePerDay', 'readShare']) if (!isShare(f[k])) fail(id, `compliance.followUp.${k} is a share between 0 and 1`);
+  if (!(typeof f.rampBoost === 'number' && f.rampBoost >= 0 && f.rampBoost <= 10)) fail(id, 'compliance.followUp.rampBoost is 0..10');
+  if (!isInt(f.minGapDays) || f.minGapDays < 1 || f.minGapDays > 14) fail(id, 'compliance.followUp.minGapDays is 1..14');
+  if (!inWindow(f.surgeFromDay)) fail(id, 'compliance.followUp.surgeFromDay is a day inside -60..-1');
+  if (!Array.isArray(f.staffWeights) || f.staffWeights.length !== 3 || f.staffWeights.some((w) => !(w >= 0)) || !f.staffWeights.some((w) => w > 0)) fail(id, 'compliance.followUp.staffWeights gives the three staff members a weight each');
+  if (typeof c.personas !== 'boolean') fail(id, 'compliance.personas is true or false');
 }
 
 /** Every scenario under scenarios/, validated, keyed by id, in file-name order. */
@@ -294,7 +341,7 @@ export function plainParameters(def) {
     return `${n} ${span(c.fromDay, c.toDay)} (about ${(n / weeks).toFixed(1)} a week${c.stoppedLearning ? `, ${c.stoppedLearning} of them by learners who had stopped opening lessons` : ''})`;
   });
   lines.push(`${total} subscriptions are cancelled: ${periods.join('; ')}.`);
-  lines.push(...plainCarts(p.carts ?? null), ...plainSupport(p.support ?? null));
+  lines.push(...plainCarts(p.carts ?? null), ...plainSupport(p.support ?? null), ...plainCompliance(p.compliance ?? null));
   lines.push('A release goes out every 10 to 14 days, on a weekday. About 1% of requests come from a search-engine crawler, on public pages only.');
   return lines;
 }
@@ -330,13 +377,26 @@ function plainSupport(s) {
   lines.push(s.slowdown
     ? `Staff take up a question a median of ${hours(s.replyMedianHoursBefore)} after it is asked (log-normal spread ${s.replySpread}) until ${-s.slowdown.fromDay} days before the start date, slowing evenly to ${hours(s.replyMedianHoursAfter)} by ${-s.slowdown.toDay} days before; the next staff visit after that (weekdays, office hours) answers it, so questions not taken up by the start date stay open.`
     : `Staff take up a question a median of ${hours(s.replyMedianHoursBefore)} after it is asked (log-normal spread ${s.replySpread}); the next staff visit after that (weekdays, office hours) answers it, so most questions are answered the same day or the next morning.`);
-  const h = s.help;
-  if (h) {
-    lines.push(`On ${pct(h.visitShare)} of their visits learners also open the Help page to look at their questions. A learner whose own question is still open checks it on ${pct(h.checkShare)} of their visits; one who finds it unanswered after more than ${hours(h.giveUpAfterHours)} gives up on Help: from then on they open it on only ${pct(h.visitShareGivenUp)} of their visits and ask nothing more.`);
-    if (h.giveUp) lines.push(`${pct(h.giveUp.share)} of the learners give up on Help in the same way, each from a day ${span(h.giveUp.fromDay, h.giveUp.toDay)}, spread evenly.`);
-    if (h.persona) lines.push('Lena Hoffmann (lena.hoffmann@example.com), an active learner, asks about an invoice 50 days before the start date and is answered within hours; she asks whether LearnLoop issues certificates of completion 12 days before, checks the Help page 9, 5 and 2 days before, and nobody answers it.');
-  }
   if (s.personaQuestion) lines.push('Ana Moreno (ana.moreno@example.com) asks whether she will get a certificate for Cloud Foundations 5 days before the start date; nobody answers it.');
+  return lines;
+}
+
+const dayRef = (d) => (d < 0 ? `${-d} day${d === -1 ? '' : 's'} before the start date` : d === 0 ? 'on the start date' : `${d} day${d === 1 ? '' : 's'} after the start date`);
+
+function plainCompliance(c) {
+  if (!c) return [];
+  const courseTitle = (key) => COURSES.find((x) => x.key === key).title;
+  const employees = c.organizations.reduce((n, o) => n + o.employees, 0);
+  const lines = [`${employees} of the learners are employees of ${c.organizations.length} enterprise accounts, chosen among the learners already enrolled in their account's first required course who never cancel; each is in a team with a manager. ${pct(c.behindShare)} of the employees who did not complete their account's first required course on time are in the teams marked as behind; the others mostly in the other teams.`];
+  for (const o of c.organizations) {
+    lines.push(`${o.name}: ${o.employees} employees in ${o.teams.map((t) => `${t.name}${t.behind ? ' (behind)' : ''}`).join(', ')}; required courses ${o.courses.map((k) => `${courseTitle(k.course)} (assigned ${dayRef(k.assignedDay)}, due ${dayRef(k.dueDay)})`).join(' and ')}.`);
+  }
+  lines.push(`A required course counts as completed when every lesson is completed and every quiz in it has an attempt of ${c.requiredPassScore}% or more. After a quiz attempt below that on a required course, the employee takes it again at once in ${pct(c.quizRetry.share)} of the cases, up to ${c.quizRetry.maxRetries} more times. Nothing else about how employees learn changes.`);
+  const f = c.followUp;
+  lines.push(`On weekdays staff chase every required course not completed yet, by hand: from ${f.daysBefore} days before the due date (${pct(f.chasePerDay)} of the courses a day, rising to ${pct(f.chasePerDay * (1 + f.rampBoost))} on the last day) until ${f.daysAfter} days after it (${pct(f.overduePerDay)} a day), at most once every ${f.minGapDays} days per course. They do it in their ordinary Admin visits: they search the learner list (loaded once per visit), open the employee's Training and send one reminder from the same template; ${f.staffWeights.map((w) => pct(w / f.staffWeights.reduce((a, b) => a + b, 0))).join(', ')} of them are sent by Sofia Lindqvist, Daniel Okafor and Priya Nair.`);
+  lines.push(`Employees open ${pct(f.readShare)} of the reminders on their next visit and otherwise carry on as before.`);
+  lines.push(`From ${dayRef(f.surgeFromDay)} on, each day's follow-up up to what the same weekday four weeks earlier had is the ordinary follow-up; the rest is the surge.`);
+  if (c.personas) lines.push(`Lena Hoffmann (${'lena.hoffmann@example.com'}) is an employee in a team that is behind who still signs in, overdue on a required course she has started; Tobias Brandt (${'tobias.brandt@example.com'}) is her manager.`);
   return lines;
 }
 
@@ -352,6 +412,7 @@ export function publicCard(def) {
 }
 
 const STATE_WORDS = {
+  training_follow_up_surge_notifications: 'the reminders sent in the left-out follow-up are not in notifications.json',
   carts: 'the saved carts (carts.json) are empty',
   support_requests: 'there are no support questions (support_requests.json is empty)',
   support_reply_notifications: 'no learner has a reply notification from the team',
@@ -364,9 +425,14 @@ export function plainStages(def) {
   return r.stages.map((s, i) => {
     const caseTitle = def.cases[s.adds_case - 1].title;
     const lines = [`Stage ${i + 1} adds case ${s.adds_case}: ${caseTitle}.`];
+    const activities = s.recent_activity_withheld ?? [];
     if (s.recent_traffic_withheld.length) {
       lines.push(`From ${-r.recent_window_from_day} days before the start date on, these requests are left out of the logs: ${s.recent_traffic_withheld.join(', ')}. Everything before that day is the same as in the last stage.`);
-    } else {
+    }
+    if (activities.includes(FOLLOW_UP_SURGE)) {
+      lines.push(`From ${-r.recent_window_from_day} days before the start date on, the staff's follow-up of required training above its earlier level (its training look-ups and reminders, the bell polling meanwhile and the employees opening those reminders) is left out of the logs; the follow-up at the earlier level stays, day for day.`);
+    }
+    if (!s.recent_traffic_withheld.length && !activities.length) {
       lines.push('Nothing is left out: this is the whole scenario, exactly as it is generated in one load.');
     }
     if (s.state_withheld.length) lines.push(`In the app's starting state ${s.state_withheld.map((k) => STATE_WORDS[k]).join(', and ')}.`);

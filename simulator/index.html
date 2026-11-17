@@ -67,7 +67,7 @@
         </label>
         <p class="hint">Ticked by default only for the last stage. Upload already puts each stage's starting state where LearnLoop reads it in AWS. Publishing matters for later: LearnLoop's "Preview reset" restores the app's state from main, so main should hold the final state, and an earlier stage does not need a deploy in the middle of the demo.</p>
         <p class="hint" id="stage-anchor-note" hidden></p>
-        <p class="hint stage-caution">Until a case is loaded and read, do not use its part of LearnLoop yourself (the cart and the checkout before stage 2, the Help page before stage 3): your own visits today would be the only recent visits the agent sees on those pages.</p>
+        <p class="hint stage-caution">Until a case is loaded and read, do not use its part of LearnLoop yourself (the cart and the checkout before stage 2, an employee's Training and reminders in Admin before stage 3): your own visits today would be the only recent visits the agent sees on those pages.</p>
         <div class="start-over">
           <button type="button" id="start-over">Start over</button>
           <span class="hint">Loads stage 1 again. Afterwards remove the LearnLoop application in the Governance Agent and onboard it again: it keeps the highest number of people it has read for every period, so an application that has read a later stage never shows these drops again.</span>

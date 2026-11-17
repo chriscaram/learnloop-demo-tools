@@ -1,7 +1,7 @@
 {
   "id": "q4-three-signals",
   "title": "A quarter where three things slip at once",
-  "description": "Over the same few weeks, about six weeks before the start date, three things change. A third of the paying learners stop opening lessons but keep signing in. Learners keep putting their next course in the cart, yet far fewer complete the checkout. And the three-person team answers learner questions more and more slowly, until half of the learners stop coming back to the Help page. The application stays fast and healthy throughout.",
+  "description": "Over the same few weeks, about six weeks before the start date, three things change. A third of the paying learners stop opening lessons but keep signing in. Learners keep putting their next course in the cart, yet far fewer complete the checkout. And the employees of three enterprise customers fall behind on the courses their employer requires by a deadline, while the three-person team chases them by hand with hundreds of near-identical reminders. The application stays fast and healthy throughout.",
   "cases": [
     {
       "title": "Learners stop continuing their course",
@@ -16,38 +16,38 @@
       "ai_agent": "A cart reminder: reminds each learner of the course waiting in their cart and links back to it."
     },
     {
-      "title": "The team stops answering questions in time",
-      "what_changes": "Questions pile up on a few repetitive topics (certificates, invoices, accounts) and replies slow from hours to weeks, so learners stop coming back to Help.",
-      "who": "Staff and learners · for example Sofia Lindqvist (staff) and Lena Hoffmann",
-      "ai_agent": "Draft replies for the staff: prepares an answer to each repetitive open question for the team to check and send."
+      "title": "Required training falls behind",
+      "what_changes": "Three enterprise customers require their employees to finish certain courses by a deadline. Many fall behind, mostly in a few teams; the team looks employees up one at a time and sends hundreds of near-identical reminders, more and more as deadlines approach, and on-time completion does not improve.",
+      "who": "Staff and employees · for example Sofia Lindqvist (staff), Lena Hoffmann (employee) and Tobias Brandt (her manager)",
+      "ai_agent": "A compliance follow-up: a staff view of completion by account, team and manager with who is at risk, and an AI agent that follows up, reschedules, escalates to the manager and adapts the required training."
     }
   ],
-  "expected_finding": "Three separate findings, each about fewer returning users on part of a different capability, each saying the application was healthy over the period. About 40% fewer learners open lessons in 'Course delivery and learner progress' (an AI agent could bring inactive learners back with a lesson reminder). About half as many learners complete the enrolment step of the checkout in the catalog and purchase capability, while nearly as many as before put courses in their cart (an AI agent could remind the roughly 145 learners whose courses wait in their cart). And about half as many learners come back to the Help page, in the capability that holds the learner notifications and Help (an AI agent could draft answers to the repetitive open questions for the staff to check and send).",
+  "expected_finding": "Two separate findings, each about fewer returning users on part of a different capability, each saying the application was healthy over the period. About 40% fewer learners open lessons in 'Course delivery and learner progress' (an AI agent could bring inactive learners back with a lesson reminder). About half as many learners complete the enrolment step of the checkout in the catalog and purchase capability, while nearly as many as before put courses in their cart (an AI agent could remind the roughly 145 learners whose courses wait in their cart). The third case, required training falling behind, raises no finding with the Governance Agent's current detectors: its evidence is in the training assignments, the staff's look-ups and the reminder messages, which no detector reads yet (docs/signal-spec.md).",
   "status": "verified",
   "verified_against": [
     {
       "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (detectActorInactivity, actorDropVerdict) and constants.js (ACTOR_INACTIVITY_DROP_PCT = 33, MIN_INACTIVITY_ACTORS = 200, MIN_ACTOR_WINDOW_DAYS = 7, MAX_ACTOR_WINDOW_LENGTH_RATIO = 1.5, MIN_TREND_DAYS = 14)",
-      "threshold": "Learning (services/learning, the capability that holds the lesson routes): distinct client IPs on GET /api/lessons/{lessonId} and GET /api/courses/{courseId}/lessons fall 334 -> 193 (-42.2%) and on POST /api/lessons/{lessonId}/progress 334 -> 181..184 (-44.9..-45.8%), for start dates on all seven weekdays (days -59..-30 against -29..0). The capability-level max (GET /api/me/progress, read at every sign-in, about 410 -> 394) moves 3.7..4.4%, so the route-level fallback reports the lesson routes. Both windows are 30 days and every day is observed."
+      "threshold": "Learning (services/learning, the capability that holds the lesson routes): distinct client IPs on GET /api/lessons/{lessonId} and GET /api/courses/{courseId}/lessons fall 334 -> 193 (-42.2%) and on POST /api/lessons/{lessonId}/progress 334 -> 177..184 (-44.9..-47.0%), for start dates on all seven weekdays (days -59..-30 against -29..0). The capability-level max (GET /api/me/progress, read at every sign-in, about 410 -> 394) moves 3.7..4.4%, so the route-level fallback reports the lesson routes. Both windows are 30 days and every day is observed. The compliance case leaves these numbers exactly as they are (test/scenarios.test.js and test/governance-agent.test.js run the scenario with and without it)."
     },
     {
       "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (detectActorInactivity: the route-level fallback names the qualifying route with the most earlier users)",
-      "threshold": "Catalog (services/catalog: cart and enrolment): distinct client IPs on POST /api/courses/{courseId}/enrol fall from 298..311 to 145..160 (-46.3..-52.9% on all seven start weekdays). The only other catalog route that moves is POST /api/me/cart/items (about 318 -> 290, -2.9..-15.3%), under the 33% bar, so the enrol route is the one named; GET /api/me/cart, GET /api/courses and GET /api/courses/{courseId} move under 5% (capability-level max -3.7..-4.4%). Learners who stopped opening lessons keep saving courses in the cart, which is why cart adds stay flat while lessons fall. data/seed/carts.json holds 140..155 learners with courses waiting in their cart."
+      "threshold": "Catalog (services/catalog: cart and enrolment): distinct client IPs on POST /api/courses/{courseId}/enrol fall from 301..316 to 148..158 (-48.0..-52.8% on all seven start weekdays). The only other catalog route that moves is POST /api/me/cart/items (about 320 -> 288, -7.7..-13.5%), under the 33% bar, so the enrol route is the one named; GET /api/me/cart, GET /api/courses and GET /api/courses/{courseId} move under 5% (capability-level max -3.6..-4.4%). Learners who stopped opening lessons keep saving courses in the cart, which is why cart adds stay flat while lessons fall. data/seed/carts.json holds 139..155 learners with courses waiting in their cart."
     },
     {
-      "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (detectActorInactivity, route-level fallback); packages/platform/telemetry/routes.js (declared_in_code)",
-      "threshold": "Notifications (services/notifications, which also declares the learner Help routes): distinct client IPs on /api/me/support-requests (GET to read their questions and answers, POST to ask) fall from 290..307 to 148..155 (-46.6..-50.3% on all seven start weekdays). GET /api/me/notifications/unread-count (every sign-in, the capability-level max) moves 3.7..4.4%, GET /api/me/notifications 8.2..11.3% and POST /api/me/notifications/{notificationId}/read 7.4..12.3%, so the Help route is the one named. The staff side (GET /api/admin/support-requests and the reply route, declared in services/admin) comes from one office address, far under MIN_INACTIVITY_ACTORS, so it raises nothing on its own; staff open the queue about half as often and send about a third as many replies. data/seed/support_requests.json ends with 22..38 open questions, 94-100% of them about certificates, billing or the account, and the earlier answers carry real staff ids."
+      "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (observationsForGoal: every rule reads route baselines; none reads state documents or event payloads); packages/platform/telemetry/ingestion.js (route aggregates: requests, distinct client IPs, daily counts)",
+      "threshold": "Compliance training: no current detector fires, checked with a goal '95% of mandatory training completed on time' linked to the capability that holds the staff's look-ups and reminders (services/admin), in every stage and on all seven start weekdays. The staff are three people at one office address (distinct users 1, far under MIN_INACTIVITY_ACTORS = 200), their traffic rises rather than falls (no GOAL_TREND_NEGATIVE), and the evidence is in data/seed/training_assignments.json (overdue courses concentrated in the teams marked behind: 48..93% overdue there, 0..22% in the other teams), in the reminder notifications (one template, a few titles) and in the volume of GET /api/admin/learners/{userId}/training and POST /api/admin/learners/{userId}/message from the staff (103..146 reminders in days -59..-30, 293..388 in days -29..0), none of which a detector reads. Help and support are an ordinary feature (about 3 questions a week, answered within a day) and raise nothing."
     },
     {
       "file": "packages/modules/new-evolution-opportunity/drift/explanations.js (evaluateIncident, evaluateDataQuality; SUPPRESSING_CAUSES in constants.js)",
-      "threshold": "server errors stay at or below 0.05% per capability per window (under 0.4% on the worst route-day), far under INCIDENT_ERROR_RATE_PCT = 5, with no client errors on these routes and p95 about 105-131 ms on lesson routes and 55-63 ms elsewhere, unchanged at the drops, so incident_or_outage is ruled out, not confirmed; every hour of the 60 days has logs, so data_quality has no gap to confirm; the three changes are spread over days -45..-30 across several releases. None of the three is withdrawn."
+      "threshold": "server errors stay at or below 0.05% per capability per window (under 0.4% on the worst route-day), far under INCIDENT_ERROR_RATE_PCT = 5, with no client errors on these routes and p95 about 105-131 ms on lesson routes and 55-63 ms elsewhere, unchanged at the drops, so incident_or_outage is ruled out, not confirmed; every hour of the 60 days has logs, so data_quality has no gap to confirm; the changes are spread over days -45..-30 across several releases. Neither finding is withdrawn."
     },
     {
       "file": "packages/modules/new-evolution-opportunity/approach/eligibility.js",
-      "threshold": "NBF-USAGE-ACTOR_INACTIVITY is an 'agentic_candidate' (inactivity_churn), so for each of the three the solution architect may propose an AI agent: a lesson reminder (progress.json: last_activity_at of the learners who stopped), a cart reminder (carts.json), and replies drafted for staff to approve (support_requests.json: the open questions, and the earlier answers to the same questions)."
+      "threshold": "NBF-USAGE-ACTOR_INACTIVITY is an 'agentic_candidate' (inactivity_churn), so for each of the two the solution architect may propose an AI agent: a lesson reminder (progress.json: last_activity_at of the learners who stopped) and a cart reminder (carts.json). The compliance case would need a detector first (docs/signal-spec.md)."
     },
     {
       "file": "backend/src/cadence.js (continueAfterTelemetryIngest: the earlier window is read once per application), packages/platform/telemetry/ingestion.js (route baselines exist only for routes with requests in the window read), packages/modules/new-evolution-opportunity/drift/usage.js (actorWindowsOf: the highest distinct-user count per window is kept), detectors.js (actorDropVerdict: a route needs two measured windows)",
-      "threshold": "The staged reveal (staged_reveal below). One 'Get usage telemetry' reads days -29..0 again; days -59..-30 are read only when the application is onboarded (GA_TELEMETRY_HISTORY_WINDOWS = 1, and a later read finds that history already read). So every stage carries the final traffic of days -60..-30, and withholds only the recent traffic of the routes whose drop is a later case. A withheld route then has one measured window (too_few_measured_windows, no finding) until its stage brings its recent window; the routes already revealed are byte for byte the same in every stage, so the agent's max-per-window merge keeps their numbers and the stage-1 finding keeps its fingerprint (one live finding per code and capability: duplicate_live). Checked with the agent's own observationsForGoal over baselines built from each stage, start dates on all seven weekdays: stage 1 raises only the lesson finding, stage 2 adds the enrol finding (earlier 298..311 -> recent 145..160), stage 3 adds the Help finding (290..307 -> 148..155); the cart write routes are withheld with enrolment so that no goal-trend observation about purchases appears before stage 2."
+      "threshold": "The staged reveal (staged_reveal below). One 'Get usage telemetry' reads days -29..0 again; days -59..-30 are read only when the application is onboarded (GA_TELEMETRY_HISTORY_WINDOWS = 1, and a later read finds that history already read). So every stage carries the final traffic of days -60..-30, and withholds only recent traffic: the cart write and enrol routes until stage 2, and, until stage 3, the part of the staff's training follow-up above its earlier level (a named activity, not a route: the routes keep the follow-up at its earlier level, day for day, so no stage shows a fall in the staff's activity). A withheld route has one measured window (too_few_measured_windows, no finding) until its stage brings its recent window; the routes already revealed are byte for byte the same in every stage, so the agent's max-per-window merge keeps their numbers and the stage-1 finding keeps its fingerprint (one live finding per code and capability: duplicate_live). Checked with the agent's own observationsForGoal over baselines built from each stage, start dates on all seven weekdays: stage 1 raises only the lesson finding, stage 2 adds the enrol finding (earlier 301..316 -> recent 148..158), stage 3 adds nothing a current detector sees."
     }
   ],
   "parameters": {
@@ -99,46 +99,148 @@
       "lapsedAddPerBrowseSession": 0.15
     },
     "support": {
-      "perWeekBefore": 25,
-      "perWeekAfter": 12,
-      "rise": {
-        "fromDay": -40,
-        "toDay": -28
-      },
+      "perWeekBefore": 3,
+      "perWeekAfter": 3,
+      "rise": null,
       "topicsBefore": {
-        "certificate": 9,
-        "billing": 5,
-        "account": 4,
-        "course_content": 1,
-        "other": 0.5
+        "billing": 3,
+        "certificate": 2,
+        "account": 3,
+        "course_content": 3,
+        "other": 1
       },
       "topicsAfter": {
-        "certificate": 9,
-        "billing": 5,
-        "account": 4,
-        "course_content": 1,
-        "other": 0.5
+        "billing": 3,
+        "certificate": 2,
+        "account": 3,
+        "course_content": 3,
+        "other": 1
       },
       "replyMedianHoursBefore": 3,
-      "replyMedianHoursAfter": 480,
-      "slowdown": {
-        "fromDay": -40,
-        "toDay": -30
-      },
+      "replyMedianHoursAfter": 3,
+      "slowdown": null,
       "replySpread": 0.6,
-      "personaQuestion": false,
-      "help": {
-        "visitShare": 0.12,
-        "checkShare": 0.6,
-        "giveUpAfterHours": 48,
-        "visitShareGivenUp": 0.005,
-        "giveUp": {
-          "fromDay": -40,
-          "toDay": -30,
-          "share": 0.57
+      "personaQuestion": false
+    },
+    "compliance": {
+      "requiredPassScore": 60,
+      "organizations": [
+        {
+          "name": "Northwind Logistics",
+          "employees": 95,
+          "teams": [
+            {
+              "name": "Warehouse operations",
+              "behind": true
+            },
+            {
+              "name": "Customer service",
+              "behind": false
+            },
+            {
+              "name": "Finance",
+              "behind": false
+            },
+            {
+              "name": "Fleet planning",
+              "behind": false
+            }
+          ],
+          "courses": [
+            {
+              "course": "cloud",
+              "assignedDay": -82,
+              "dueDay": -36
+            },
+            {
+              "course": "iac",
+              "assignedDay": -30,
+              "dueDay": 6
+            }
+          ]
         },
-        "persona": true
-      }
+        {
+          "name": "Helix Health Partners",
+          "employees": 80,
+          "teams": [
+            {
+              "name": "Patient services",
+              "behind": true
+            },
+            {
+              "name": "Clinical administration",
+              "behind": false
+            },
+            {
+              "name": "People and culture",
+              "behind": false
+            }
+          ],
+          "courses": [
+            {
+              "course": "manager",
+              "assignedDay": -66,
+              "dueDay": -22
+            },
+            {
+              "course": "feedback",
+              "assignedDay": -20,
+              "dueDay": 14
+            }
+          ]
+        },
+        {
+          "name": "Corvel Bank",
+          "employees": 60,
+          "teams": [
+            {
+              "name": "Retail branches",
+              "behind": true
+            },
+            {
+              "name": "Risk and compliance",
+              "behind": false
+            },
+            {
+              "name": "Data office",
+              "behind": false
+            }
+          ],
+          "courses": [
+            {
+              "course": "sql",
+              "assignedDay": -56,
+              "dueDay": -12
+            },
+            {
+              "course": "dataviz",
+              "assignedDay": -10,
+              "dueDay": 30
+            }
+          ]
+        }
+      ],
+      "behindShare": 0.9,
+      "quizRetry": {
+        "share": 0.8,
+        "maxRetries": 3
+      },
+      "followUp": {
+        "daysBefore": 10,
+        "daysAfter": 21,
+        "chasePerDay": 0.18,
+        "rampBoost": 2,
+        "overduePerDay": 0.3,
+        "minGapDays": 2,
+        "readShare": 0.4,
+        "surgeFromDay": -29,
+        "staffWeights": [
+          0.6,
+          0.25,
+          0.15
+        ]
+      },
+      "personas": true
     }
   },
   "staged_reveal": {
@@ -147,36 +249,36 @@
     "stages": [
       {
         "adds_case": 1,
-        "expected_new_finding": "One finding: about 42% fewer people open lessons in 'Course delivery and learner progress' (the lesson routes, 334 -> 193). Nothing about the store or Help yet.",
+        "expected_new_finding": "One finding: about 42% fewer people open lessons in 'Course delivery and learner progress' (the lesson routes, 334 -> 193). Nothing about the store, and the staff's training follow-up at its earlier level.",
         "recent_traffic_withheld": [
           "POST /api/courses/{courseId}/enrol",
           "POST /api/me/cart/items",
-          "DELETE /api/me/cart/items/{courseId}",
-          "GET /api/me/support-requests",
-          "POST /api/me/support-requests"
+          "DELETE /api/me/cart/items/{courseId}"
+        ],
+        "recent_activity_withheld": [
+          "training_follow_up_surge"
         ],
         "state_withheld": [
           "carts",
-          "support_requests",
-          "support_reply_notifications"
+          "training_follow_up_surge_notifications"
         ]
       },
       {
         "adds_case": 2,
-        "expected_new_finding": "A second finding, the first one still there: about half as many people complete the enrolment step of the checkout in the catalog and purchase capability (POST /api/courses/{courseId}/enrol, 298..311 -> 145..160).",
-        "recent_traffic_withheld": [
-          "GET /api/me/support-requests",
-          "POST /api/me/support-requests"
+        "expected_new_finding": "A second finding, the first one still there: about half as many people complete the enrolment step of the checkout in the catalog and purchase capability (POST /api/courses/{courseId}/enrol, 301..316 -> 148..158).",
+        "recent_traffic_withheld": [],
+        "recent_activity_withheld": [
+          "training_follow_up_surge"
         ],
         "state_withheld": [
-          "support_requests",
-          "support_reply_notifications"
+          "training_follow_up_surge_notifications"
         ]
       },
       {
         "adds_case": 3,
-        "expected_new_finding": "A third finding, the first two still there: about half as many people come back to the Help page in the capability that holds the learner notifications and Help (/api/me/support-requests, 290..307 -> 148..155).",
+        "expected_new_finding": "No new finding from the current detectors, the first two still there: the staff's reminders and training look-ups about triple in the last 30 days (103..146 -> 293..388 reminders), while overdue required training stays concentrated in a few teams (data/seed/training_assignments.json). This is the evidence a compliance detector would read (docs/signal-spec.md).",
         "recent_traffic_withheld": [],
+        "recent_activity_withheld": [],
         "state_withheld": []
       }
     ]

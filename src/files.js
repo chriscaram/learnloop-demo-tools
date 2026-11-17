@@ -18,9 +18,22 @@ export function formatJson(value) {
   return `{\n${entries.join(',\n')}\n}\n`;
 }
 
+// State domains LearnLoop reads that a scenario without them leaves out of its data (its
+// generated output stays what it was). They are written empty, so loading such a scenario
+// never leaves another scenario's accounts and assignments behind in data/seed/ or the
+// state bucket.
+export const ALWAYS_WRITTEN_DOMAINS = Object.freeze(['organizations', 'training_assignments']);
+
+/** The state documents to write: the generated ones, plus every ALWAYS_WRITTEN_DOMAINS one (empty when not generated). */
+export function completeState(data) {
+  const out = { ...data };
+  for (const domain of ALWAYS_WRITTEN_DOMAINS) out[domain] ??= [];
+  return out;
+}
+
 export async function writeData(data, dir = DATA_DIR) {
   await mkdir(dir, { recursive: true });
-  for (const [domain, value] of Object.entries(data)) {
+  for (const [domain, value] of Object.entries(completeState(data))) {
     await writeFile(path.join(dir, `${domain}.json`), formatJson(value));
   }
 }

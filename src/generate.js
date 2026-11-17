@@ -4,6 +4,8 @@ import { replyDueAt } from './contract/support.js';
 import { emitLogs } from './emit.js';
 import { SUPPORT_REPLY_NOTIFICATION } from './contract/actions.js';
 import { DEFAULT_SCENARIO, getScenario, stageOf } from './scenarios.js';
+import { FOLLOW_UP_SURGE, TRAINING_ROUTE } from './compliance.js';
+import { trainingState } from './contract/training.js';
 
 export const PLACEHOLDER_DISTRIBUTION_ID = 'E000000SEEDLOG';
 export const PLACEHOLDER_DISTRIBUTION_DOMAIN = 'd000000seedlog.cloudfront.net';
@@ -34,7 +36,7 @@ export function generate({
 /** The simulation as a stage shows it: withheld requests and state left out (the same object for no stage). */
 export function stageView(sim, st) {
   const withhold = stageWithhold(sim, st);
-  const data = stageState(sim.data, st);
+  const data = stageState(sim.data, st, sim);
   if (!withhold && data === sim.data) return sim;
   return { ...sim, data, requests: withhold ? sim.requests.filter((r) => !isWithheld(r, withhold)) : sim.requests };
 }
@@ -46,19 +48,26 @@ export function stageStats(view, logs, st) {
 
 /** What a stage leaves out of the logs: null when nothing (no stage, or the last one). */
 export function stageWithhold(sim, st) {
-  if (!st || st.withheldRoutes.size === 0) return null;
-  return { routes: st.withheldRoutes, fromMs: sim.anchorMs + st.fromDay * DAY_MS };
+  if (!st || (st.withheldRoutes.size === 0 && st.withheldActivities.size === 0)) return null;
+  return { routes: st.withheldRoutes, activities: st.withheldActivities, fromMs: sim.anchorMs + st.fromDay * DAY_MS };
 }
+/** Whether a request belongs to what a stage leaves out: a withheld route, or a withheld named activity (any kind of line). */
+export const isHeld = (r, withhold) => !!withhold
+  && ((r.kind === 'api' && withhold.routes.has(`${r.method} ${r.route}`)) || (r.activity !== undefined && withhold.activities.has(r.activity)));
 /** Whether one simulated request is left out (by its start time; the logs decide per line). */
-export const isWithheld = (r, withhold) => !!withhold && r.kind === 'api' && r.ts >= withhold.fromMs && withhold.routes.has(`${r.method} ${r.route}`);
+export const isWithheld = (r, withhold) => isHeld(r, withhold) && r.ts >= withhold.fromMs;
 
 /** The starting state of a stage: the withheld documents written empty. */
-export function stageState(data, st) {
+export function stageState(data, st, sim = null) {
   if (!st || st.stateWithheld.size === 0) return data;
   const out = { ...data };
   if (st.stateWithheld.has('carts')) out.carts = [];
   if (st.stateWithheld.has('support_requests')) out.support_requests = [];
   if (st.stateWithheld.has('support_reply_notifications')) out.notifications = data.notifications.filter((n) => n.type !== SUPPORT_REPLY_NOTIFICATION.type);
+  if (st.stateWithheld.has('training_follow_up_surge_notifications')) {
+    const surge = sim?.activityNotifications?.get(FOLLOW_UP_SURGE) ?? new Set();
+    out.notifications = (out.notifications ?? data.notifications).filter((n) => !surge.has(n.id));
+  }
   return out;
 }
 
@@ -169,6 +178,155 @@ export function computeStats(sim, logs) {
     carts: cartView(sim, api, dayOf),
     support: supportView(sim, dayOf),
     capabilities: capabilityView(api, dayOf),
+    compliance: complianceView(sim, api, dayOf),
+  };
+}
+
+/** A reminder from the staff's follow-up template (contract: src/compliance.js reminderText). */
+export const REMINDER_TITLE = /^(Reminder: complete|Overdue:) "/;
+
+/**
+ * Enterprise accounts (null without them). From the state, the way LearnLoop derives it at
+ * the start date: each required course's status, per account, team and manager, and the
+ * on-time share per due date. From the logs (the requests this view keeps), per detector
+ * window: the staff's training look-ups, learner-list loads and reminders (a staff message
+ * whose notification has a template title), per staff member and week; the employees'
+ * failed quiz attempts on required courses; whether a reminder was opened and was followed
+ * by any lesson activity on the course within 7 days.
+ */
+function complianceView(sim, api, dayOf) {
+  const { data } = sim;
+  if (!data.training_assignments) return null;
+  const now = new Date(sim.anchorMs);
+  const users = new Map(data.users.map((u) => [u.id, u]));
+  const orgs = new Map(data.organizations.map((o) => [o.id, o.name]));
+  const lessonsByCourse = new Map();
+  for (const l of data.lessons) {
+    if (!lessonsByCourse.has(l.course_id)) lessonsByCourse.set(l.course_id, []);
+    lessonsByCourse.get(l.course_id).push(l);
+  }
+  const lessonCourse = new Map(data.lessons.map((l) => [l.id, l.course_id]));
+  const titles = new Map(data.courses.map((c) => [c.id, c.title]));
+  const progressBy = new Map();
+  for (const p of data.progress.lessons) progressBy.set(`${p.user_id}|${p.course_id}`, [...(progressBy.get(`${p.user_id}|${p.course_id}`) ?? []), p]);
+  const quizBy = new Map();
+  for (const q of data.quiz_results) {
+    const key = `${q.user_id}|${lessonCourse.get(q.lesson_id)}`;
+    quizBy.set(key, [...(quizBy.get(key) ?? []), q]);
+  }
+  const rows = data.training_assignments.map((a) => {
+    const lessons = [...lessonsByCourse.get(a.course_id)].sort((x, y) => x.position - y.position);
+    const record = {
+      lessons: lessons.map((l) => ({ id: l.id, duration_min: l.duration_min, hasQuiz: Boolean(l.quiz) })),
+      progress: progressBy.get(`${a.user_id}|${a.course_id}`) ?? [],
+      quizResults: quizBy.get(`${a.user_id}|${a.course_id}`) ?? [],
+    };
+    const u = users.get(a.user_id);
+    return { a, u, state: trainingState(a, record, now), dueDay: dayOf(Date.parse(a.due_at)) };
+  });
+  const tally = (list) => {
+    const due = list.filter((r) => Date.parse(r.a.due_at) <= now.getTime());
+    const upcoming = list.filter((r) => Date.parse(r.a.due_at) > now.getTime());
+    return {
+      assignments: list.length,
+      dueByStart: due.length,
+      overdue: due.filter((r) => r.state.status === 'overdue').length,
+      overduePct: due.length ? Math.round((1000 * due.filter((r) => r.state.status === 'overdue').length) / due.length) / 10 : null,
+      completedOnTime: list.filter((r) => r.state.completedOnTime).length,
+      // not completed and due within 14 days of the start date
+      atRisk: upcoming.filter((r) => r.state.status !== 'completed' && r.dueDay <= 14).length,
+    };
+  };
+  const groupBy = (key) => {
+    const out = {};
+    for (const r of rows) (out[key(r)] ??= []).push(r);
+    return Object.fromEntries(Object.entries(out).sort((x, y) => x[0].localeCompare(y[0])).map(([k, v]) => [k, tally(v)]));
+  };
+  const statuses = {};
+  for (const r of rows) statuses[r.state.status] = (statuses[r.state.status] ?? 0) + 1;
+  const waves = groupBy((r) => `${orgs.get(r.a.organization_id)} | ${titles.get(r.a.course_id)} | due day ${r.dueDay}`);
+  for (const [k, w] of Object.entries(waves)) {
+    const list = rows.filter((r) => `${orgs.get(r.a.organization_id)} | ${titles.get(r.a.course_id)} | due day ${r.dueDay}` === k);
+    w.onTimePct = Math.round((1000 * w.completedOnTime) / list.length) / 10;
+    w.dueDay = list[0].dueDay;
+  }
+
+  // logs
+  const staffIds = new Set(data.users.filter((u) => u.role === 'staff').map((u) => u.id));
+  const employeeIds = new Set(data.users.filter((u) => u.organization_id).map((u) => u.id));
+  const notifications = new Map(data.notifications.map((n) => [n.id, n]));
+  const windows = { earlier: [-59, -30], recent: [-29, -1] };
+  const pass = data.training_assignments[0]?.required_pass_score ?? 0;
+  const assigned = new Set(data.training_assignments.map((a) => `${a.user_id}|${a.course_id}`));
+  const reminderEvents = api.flatMap((r) => r.events.filter((e) => e.event === 'staff_message_sent').map((e) => ({ r, e, n: notifications.get(e.entityId) })))
+    .filter(({ n }) => n && REMINDER_TITLE.test(n.title));
+  const openedIds = new Set(api.flatMap((r) => r.events.filter((e) => e.event === 'notification_opened').map((e) => e.entityId)));
+  const lessonTimes = new Map();
+  for (const r of api) {
+    if (!r.userId || !employeeIds.has(r.userId)) continue;
+    for (const e of r.events) if (e.event === 'lesson_started' || e.event === 'lesson_completed') {
+      const key = `${r.userId}|${lessonCourse.get(e.entityId)}`;
+      lessonTimes.set(key, [...(lessonTimes.get(key) ?? []), e.ts]);
+    }
+  }
+  const windowView = ([from, to]) => {
+    const inWin = (ts) => { const d = dayOf(ts); return d >= from && d <= to; };
+    const staffReq = api.filter((r) => staffIds.has(r.userId) && inWin(r.ts));
+    const lookups = staffReq.filter((r) => r.route === TRAINING_ROUTE);
+    const rem = reminderEvents.filter(({ e }) => inWin(e.ts));
+    const perStaffWeek = {};
+    for (const { r, e } of rem) {
+      const key = `${users.get(r.userId).name}|${Math.floor((dayOf(e.ts) - from) / 7)}`;
+      perStaffWeek[key] = (perStaffWeek[key] ?? 0) + 1;
+    }
+    const titleCounts = {};
+    for (const { n } of rem) titleCounts[n.title] = (titleCounts[n.title] ?? 0) + 1;
+    const opened = rem.filter(({ n }) => n.read_at && openedIds.has(n.id));
+    const followed = rem.filter(({ n, e }) => {
+      const courseId = data.training_assignments.find((a) => a.user_id === n.user_id && n.title.includes(`"${titles.get(a.course_id)}"`))?.course_id;
+      return (lessonTimes.get(`${n.user_id}|${courseId}`) ?? []).some((t) => t > e.ts && t <= e.ts + 7 * DAY_MS);
+    });
+    const quiz = api.filter((r) => inWin(r.ts) && r.route === '/api/lessons/{lessonId}/quiz' && employeeIds.has(r.userId)
+      && assigned.has(`${r.userId}|${lessonCourse.get(r.events[0]?.entityId)}`));
+    const failed = quiz.filter((r) => r.events[0].value < pass);
+    const failedBy = {};
+    for (const r of failed) failedBy[r.userId] = (failedBy[r.userId] ?? 0) + 1;
+    const weekdays = (() => { let n = 0; for (let d = from; d <= to; d += 1) if (![0, 6].includes(new Date(sim.anchorMs + d * DAY_MS).getUTCDay())) n += 1; return n; })();
+    return {
+      trainingLookups: lookups.length,
+      employeesLookedUp: new Set(lookups.map((r) => r.path)).size,
+      staffLearnerListLoads: staffReq.filter((r) => r.route === '/api/admin/learners').length,
+      staffMessages: staffReq.reduce((n, r) => n + r.events.filter((e) => e.event === 'staff_message_sent').length, 0),
+      reminders: rem.length,
+      remindersPerWeekday: Math.round((10 * rem.length) / weekdays) / 10,
+      remindersByStaff: Object.fromEntries([...staffIds].map((id) => [users.get(id).name, rem.filter(({ r }) => r.userId === id).length])),
+      maxRemindersPerStaffWeek: Math.max(0, ...Object.values(perStaffWeek)),
+      reminderTitles: Object.keys(titleCounts).length,
+      topTitleShare: rem.length ? Math.round((1000 * Math.max(...Object.values(titleCounts))) / rem.length) / 10 : null,
+      remindersOpened: opened.length,
+      remindersFollowedByLessonIn7Days: followed.length,
+      staffSessionsFromOffice: new Set(staffReq.map((r) => r.sessionId).filter(Boolean)).size,
+      officeIps: [...new Set(staffReq.map((r) => r.ip))],
+      employeeQuizAttempts: quiz.length,
+      employeeFailedQuizAttempts: failed.length,
+      employeesWithRepeatedFailures: Object.values(failedBy).filter((n) => n >= 2).length,
+    };
+  };
+  const daily = [];
+  for (let d = -60; d <= -1; d += 1) {
+    daily.push({ day: d, reminders: reminderEvents.filter(({ e }) => dayOf(e.ts) === d).length, lookups: api.filter((r) => r.route === TRAINING_ROUTE && dayOf(r.ts) === d).length });
+  }
+  return {
+    employees: employeeIds.size,
+    organizations: data.organizations.length,
+    statuses,
+    byOrganization: groupBy((r) => orgs.get(r.a.organization_id)),
+    byTeam: groupBy((r) => `${orgs.get(r.a.organization_id)} | ${r.u.department}`),
+    byManager: groupBy((r) => users.get(r.u.manager_id ?? r.u.id).name),
+    waves,
+    windows: Object.fromEntries(Object.entries(windows).map(([k, w]) => [k, windowView(w)])),
+    daily,
+    surgeRequestsInLogs: api.filter((r) => r.activity === FOLLOW_UP_SURGE).length,
   };
 }
 

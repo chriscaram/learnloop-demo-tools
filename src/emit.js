@@ -44,6 +44,7 @@ const API_BYTES = {
   '/api/admin/flags': 420,
   '/api/admin/flags/{flagKey}': 380,
   '/api/admin/learners/{userId}/message': 400,
+  '/api/admin/learners/{userId}/training': 1300,
   '/api/me/cart': 1500,
   '/api/me/cart/items': 1500,
   '/api/me/cart/items/{courseId}': 900,
@@ -59,8 +60,9 @@ const hourKey = (ms) => {
 };
 
 /**
- * `withhold` ({ routes: Set of "METHOD /route", fromMs }, a stage of a staged reveal):
- * the lines of those requests stamped at or after `fromMs` are left out. Every random
+ * `withhold` ({ routes: Set of "METHOD /route", activities: Set of activity names, fromMs },
+ * a stage of a staged reveal): the lines of those requests (a withheld route, or any
+ * request tagged with a withheld activity) stamped at or after `fromMs` are left out. Every random
  * draw is still made, in the same order, and every hour keeps its CloudFront object
  * (header only, if nothing in it is left), so all other lines, and every object key,
  * are byte for byte what the same generation writes without `withhold`.
@@ -102,7 +104,8 @@ export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, 
   const host = distributionDomain;
 
   for (const req of sim.requests) {
-    const held = !!withhold && req.kind === 'api' && withhold.routes.has(`${req.method} ${req.route}`);
+    const held = !!withhold && ((req.kind === 'api' && withhold.routes.has(`${req.method} ${req.route}`))
+      || (req.activity !== undefined && withhold.activities?.has(req.activity)));
     const kept = (ms) => !held || ms < withhold.fromMs;
     let edgeMs;
     let bytesOut;

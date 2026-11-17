@@ -10,7 +10,7 @@
 // (platform/telemetry/ingestion.js: one baseline per route the read saw, busiest first).
 // Then it runs drift/detectors.js#observationsForGoal over all the rows, as
 // drift/index.js#loadDriftWorld assembles them, for three goals linked one to one to the
-// learning, catalog and notifications capabilities (one service = one capability, the
+// learning, catalog and admin capabilities (one service = one capability, the
 // declared_in_code mapping).
 //
 // Start dates on all seven weekdays.
@@ -31,10 +31,13 @@ const skip = available ? false : `the Governance Agent repository is not at ${GA
 
 const ANCHORS = ['2026-11-15', '2026-11-16', '2026-11-17', '2026-11-18', '2026-11-19', '2026-11-20', '2026-11-21'];
 const CAPABILITY_OF_SERVICE = { learning: 'cap_learning', catalog: 'cap_catalog', notifications: 'cap_notifications', admin: 'cap_admin', identity: 'cap_identity', billing: 'cap_billing' };
+// The compliance goal is linked to the capability that holds the staff's training look-ups
+// and reminders (services/admin): no current detector may raise anything about it in any
+// stage (docs/signal-spec.md says why).
 const GOALS = [
   ['g_learn', 'More learners actively progressing every week', 'cap_learning'],
   ['g_cart', 'Complete the purchases learners start', 'cap_catalog'],
-  ['g_help', 'Answer learner questions within one business day, and keep learners using Help', 'cap_notifications'],
+  ['g_compliance', '95% of mandatory training completed on time across enterprise accounts', 'cap_admin'],
 ].map(([goal_id, statement, capability_id]) => ({
   goal_id, statement, status: 'confirmed', metric: { name: statement }, served_by: [{ capability_id, weight: 1, confirmed: true }],
 }));
@@ -104,33 +107,39 @@ function detect(rows, capabilities) {
   return GOALS.flatMap((goal) => det.observationsForGoal(goal, world).observations.map((o) => ({ goal: goal.goal_id, code: o.code, fingerprint: canonicalJson(o.fingerprint ?? {}), facts: o.facts })));
 }
 
-test('the agent\'s own detectors: stage 1 raises the lesson finding only, each later stage adds its case, nothing earlier changes', { skip }, () => {
+/** The three reads of the staged reveal (onboarding with the history read, then one per stage), detected after each. */
+function detectStages(def, anchor) {
+  const sim = simulate({ anchor, seed: 42, scenario: def });
+  const services = [...new Set(sim.requests.filter((r) => r.kind === 'api').map((r) => r.service))];
+  const capabilities = services.map((s) => ({ capability_id: CAPABILITY_OF_SERVICE[s] ?? `cap_${s}`, name: s, status: 'confirmed', criticality: 'high', entry_points: [], depends_on: [] }));
+  const current = ga.telemetry.telemetryWindow({ asOf: anchor, days: 30 });
+  const history = ga.telemetry.telemetryWindow({ asOf: new Date(Date.parse(`${current.start}T00:00:00Z`) - DAY_MS).toISOString(), days: 30 });
+  const rows = [];
+  let clock = Date.parse('2030-01-01T00:00:00Z');
+  const read = (requests, window) => {
+    for (const aggregate of aggregates(requests, window)) {
+      const b = ga.telemetry.reconstructBaseline({
+        aggregate, window, sourceKind: 'cloudfront_access_logs', capabilityId: aggregate.service ? CAPABILITY_OF_SERVICE[aggregate.service] : null,
+        signalId: 'sig_cloudfront', sourceGapDays: new Set(),
+      });
+      clock += 5;
+      rows.push({ ...b, id: `tbase_${rows.length}`, created_at: new Date(clock).toISOString(), detail: { ...b.detail, insufficient_reasons: b.insufficient_reasons } });
+    }
+  };
+  const seen = [];
+  for (const stage of [1, 2, 3]) {
+    const { requests } = stageView(sim, stageOf(def, stage));
+    read(requests, current);
+    if (stage === 1) read(requests, history); // the history read happens once, at onboarding
+    seen.push(detect(rows, capabilities));
+  }
+  return seen;
+}
+
+test('the agent\'s own detectors: stage 1 raises the lesson finding only, stage 2 adds the enrol finding, stage 3 (compliance) raises nothing new, nothing earlier changes', { skip }, () => {
   const def = getScenario('q4-three-signals');
   for (const anchor of ANCHORS) {
-    const sim = simulate({ anchor, seed: 42, scenario: def });
-    const services = [...new Set(sim.requests.filter((r) => r.kind === 'api').map((r) => r.service))];
-    const capabilities = services.map((s) => ({ capability_id: CAPABILITY_OF_SERVICE[s] ?? `cap_${s}`, name: s, status: 'confirmed', criticality: 'high', entry_points: [], depends_on: [] }));
-    const current = ga.telemetry.telemetryWindow({ asOf: anchor, days: 30 });
-    const history = ga.telemetry.telemetryWindow({ asOf: new Date(Date.parse(`${current.start}T00:00:00Z`) - DAY_MS).toISOString(), days: 30 });
-    const rows = [];
-    let clock = Date.parse('2030-01-01T00:00:00Z');
-    const read = (requests, window) => {
-      for (const aggregate of aggregates(requests, window)) {
-        const b = ga.telemetry.reconstructBaseline({
-          aggregate, window, sourceKind: 'cloudfront_access_logs', capabilityId: aggregate.service ? CAPABILITY_OF_SERVICE[aggregate.service] : null,
-          signalId: 'sig_cloudfront', sourceGapDays: new Set(),
-        });
-        clock += 5;
-        rows.push({ ...b, id: `tbase_${rows.length}`, created_at: new Date(clock).toISOString(), detail: { ...b.detail, insufficient_reasons: b.insufficient_reasons } });
-      }
-    };
-    const seen = [];
-    for (const stage of [1, 2, 3]) {
-      const { requests } = stageView(sim, stageOf(def, stage));
-      read(requests, current);
-      if (stage === 1) read(requests, history); // the history read happens once, at onboarding
-      seen.push(detect(rows, capabilities));
-    }
+    const seen = detectStages(def, anchor);
     const actor = (list, goal) => list.filter((o) => o.goal === goal && o.code === 'NBF-USAGE-ACTOR_INACTIVITY');
     const goalsWith = (list) => [...new Set(list.map((o) => o.goal))].sort();
     const [s1, s2, s3] = seen;
@@ -143,15 +152,37 @@ test('the agent\'s own detectors: stage 1 raises the lesson finding only, each l
     const enrol = actor(s2, 'g_cart')[0].facts.inactive_routes;
     assert.deepEqual(enrol.map((r) => r.route), ['/api/courses/{courseId}/enrol'], `${anchor} stage 2: ${JSON.stringify(enrol)}`);
     assert.ok(enrol[0].earlier_actors >= 200 && enrol[0].drop_pct >= 33, `${anchor} stage 2: ${JSON.stringify(enrol)}`);
-    // stage 3: the Help finding is added
-    assert.deepEqual(goalsWith(s3), ['g_cart', 'g_help', 'g_learn'], `${anchor} stage 3`);
-    const help = actor(s3, 'g_help')[0].facts.inactive_routes;
-    assert.deepEqual(help.map((r) => r.route), ['/api/me/support-requests'], `${anchor} stage 3: ${JSON.stringify(help)}`);
-    assert.ok(help[0].earlier_actors >= 200 && help[0].drop_pct >= 33);
+    // stage 3: the compliance case raises nothing with today's detectors (docs/signal-spec.md
+    // says why): the same two goals, the same observations, nothing on the admin or
+    // notifications capabilities
+    assert.deepEqual(goalsWith(s3), ['g_cart', 'g_learn'], `${anchor} stage 3: ${JSON.stringify(s3.filter((o) => !['g_cart', 'g_learn'].includes(o.goal)).map((o) => [o.goal, o.code]))}`);
+    assert.deepEqual(s3.map((o) => `${o.goal}|${o.code}|${o.fingerprint}`).sort(), s2.map((o) => `${o.goal}|${o.code}|${o.fingerprint}`).sort(), `${anchor} stage 3 = stage 2`);
+    for (const list of seen) assert.ok(!list.some((o) => o.goal === 'g_compliance'), `${anchor}: nothing about the compliance goal`);
     // every observation of a stage is still there, with the same fingerprint, in the next
     for (const [before, after, n] of [[s1, s2, 2], [s2, s3, 3]]) {
       const later = new Set(after.map((o) => `${o.goal}|${o.code}|${o.fingerprint}`));
       for (const o of before) assert.ok(later.has(`${o.goal}|${o.code}|${o.fingerprint}`), `${anchor} stage ${n} keeps ${o.goal} ${o.code} ${o.fingerprint}`);
+    }
+  }
+});
+
+// Case 3 is a pass over the finished simulation with its own random streams: without it the
+// agent finds exactly the same things about lessons and enrolment (same codes, fingerprints,
+// and the same inactive lesson and enrol routes with the same numbers). Its only footprint on
+// those capabilities is the quiz route (employees retaking quizzes) and, through it, the
+// learning goal's daily request trend; both are disclosed in docs/signal-spec.md.
+test('the compliance case leaves the lesson and enrol findings as they are, in every stage', { skip }, () => {
+  const def = getScenario('q4-three-signals');
+  const without = { ...def, parameters: { ...def.parameters, compliance: null } };
+  const LESSON_AND_ENROL = new Set(['/api/lessons/{lessonId}', '/api/courses/{courseId}/lessons', '/api/lessons/{lessonId}/progress', '/api/courses/{courseId}/enrol']);
+  const view = (list) => list.filter((o) => o.code === 'NBF-USAGE-ACTOR_INACTIVITY').map((o) => ({
+    goal: o.goal, fingerprint: o.fingerprint, routes: o.facts.inactive_routes.filter((r) => LESSON_AND_ENROL.has(r.route)),
+  }));
+  for (const anchor of ['2026-11-15', '2026-11-18', '2026-11-21']) {
+    const [a, b] = [detectStages(def, anchor), detectStages(without, anchor)];
+    for (let i = 0; i < 3; i += 1) {
+      assert.deepEqual(view(a[i]), view(b[i]), `${anchor} stage ${i + 1}: the inactivity findings`);
+      assert.deepEqual(a[i].map((o) => `${o.goal}|${o.code}`).sort(), b[i].map((o) => `${o.goal}|${o.code}`).sort(), `${anchor} stage ${i + 1}: the same observations`);
     }
   }
 });

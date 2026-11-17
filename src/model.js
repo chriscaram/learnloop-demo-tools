@@ -7,6 +7,7 @@ import {
   BROWSER_USER_AGENTS, COURSES, EDGE_LOCATIONS, FIRST_NAMES, HOURLY_WEIGHTS, LAST_NAMES, SUPPORT_QUESTIONS, SUPPORT_REPLIES,
   WEEKDAY_FACTORS,
 } from './content.js';
+import { runCompliance } from './compliance.js';
 import { createRng } from './rng.js';
 import { getScenario } from './scenarios.js';
 
@@ -19,10 +20,6 @@ export const PERSONAS = Object.freeze({
   marco: { id: 'usr_5d81f0c3a9e6', email: 'marco.bellini@example.com', name: 'Marco Bellini' },
   sofia: { id: 'usr_c4f2b7e1d038', email: 'sofia.lindqvist@example.com', name: 'Sofia Lindqvist' },
 });
-// The learner with an unanswered question (support.help.persona): one of the regular
-// learners, given this identity only in a scenario that asks for it, so no other
-// scenario's ids, names or random streams move.
-export const HELP_PERSONA = Object.freeze({ id: 'usr_e19b6a4c7f20', email: 'lena.hoffmann@example.com', name: 'Lena Hoffmann' });
 const OTHER_STAFF = [
   { email: 'daniel.okafor@example.com', name: 'Daniel Okafor' },
   { email: 'priya.nair@example.com', name: 'Priya Nair' },
@@ -49,12 +46,6 @@ const ANA_LESSON_SCRIPT = [
 const ANA_VISIT_DAYS = [-30, -27, -24, -22, -19, -16, -13, -10, -8, -5, -3, -1];
 // Ana's unanswered question (support.personaQuestion): asked on one of her visit days
 const ANA_QUESTION = { day: -5, topic: 'certificate', body: 'I am working through Cloud Foundations. Will I get a certificate when I finish it, and can I add it to my LinkedIn profile?' };
-// Lena's Help visits (support.help.persona): [day, what, topic, body, reply delay in hours]
-const LENA_HELP_SCRIPT = [
-  [-50, 'ask', 'billing', 'Can I get an invoice with my company name on it for the monthly plan?', 2],
-  [-12, 'ask', 'certificate', 'Do you issue certificates of completion? My employer asks for one.', Infinity],
-  [-9, 'check'], [-5, 'check'], [-2, 'check'],
-];
 // Marco's cart (carts.personaCart): [day, course key, opens the checkout page and leaves]
 const MARCO_CART_SCRIPT = [[-16, 'python', false], [-9, 'dataviz', true]];
 
@@ -244,25 +235,6 @@ export function simulate({ anchor, seed, scenario = undefined }) {
   const lapsedShopper = (u, day) => C?.lapsedAddPerBrowseSession !== undefined && P.lapse && u.group === 'cohortB' && !u.persona && day > u.lastLessonDay;
   const purchaseShare = (u, day) => ((u.abandonsFromDay !== undefined && day >= u.abandonsFromDay) || lapsedShopper(u, day) ? 0 : C.purchaseShare);
   const supportRequests = [];
-
-  // support.help: learners open the Help page to look at their questions; the ones who
-  // give up on it (their own question left unanswered, or from a day spread over a span)
-  // rarely come back and ask nothing more. Drawn from its own stream, only when present.
-  const H = S?.help ?? null;
-  const helpRng = createRng(seed, 'help');
-  if (H?.persona) {
-    const lena = cohortA.find((u, i) => i > 0 && u.abandonsFromDay === undefined);
-    if (learners.some((u) => u.id === HELP_PERSONA.id || u.email === HELP_PERSONA.email)) throw new Error('help persona collides with a generated learner');
-    Object.assign(lena, { ...HELP_PERSONA, persona: 'lena' });
-    usedIds.add(HELP_PERSONA.id);
-  }
-  if (H?.giveUp) {
-    const order = helpRng.shuffle(learners.filter((u) => !u.persona));
-    const quitters = order.slice(0, Math.round(order.length * H.giveUp.share));
-    const span = H.giveUp.toDay - H.giveUp.fromDay + 1;
-    quitters.forEach((u, i) => { u.helpGaveUpDay = H.giveUp.fromDay + Math.floor((i * span) / quitters.length); });
-  }
-  const gaveUpOnHelp = (u, day) => u.helpGaveUpDay !== undefined && day >= u.helpGaveUpDay;
 
   // cancellation schedule: [first day, last day, how many from cohort C, how many from cohort B]
   const cxRng = createRng(seed, 'cancellations');
@@ -515,13 +487,6 @@ export function simulate({ anchor, seed, scenario = undefined }) {
         if (script) plans.push({ user: u, type: 'lesson', script: { index: script[1], completes: script[2] } });
         else if (ANA_VISIT_DAYS.includes(day)) plans.push({ user: u, type: 'browse', readsAll: true });
         continue;
-      }
-      if (u.persona === 'lena') {
-        const script = LENA_HELP_SCRIPT.find(([d]) => d === day);
-        if (script) {
-          plans.push({ user: u, type: 'lesson', helpScript: script });
-          continue;
-        }
       }
       if (u.persona === 'marco' && day === -1) {
         plans.push({ user: u, type: 'lesson' });
@@ -1027,7 +992,7 @@ export function simulate({ anchor, seed, scenario = undefined }) {
     const f = S.rise ? ramp(day, S.rise.fromDay, S.rise.toDay) : 0;
     const perWeek = lerp(S.perWeekBefore, S.perWeekAfter, f);
     const count = poisson(supRng, (perWeek / 7) * (weekend ? 0.6 : 1.12));
-    const candidates = plans.filter((p) => !p.user.isStaff && !p.user.persona && (p.type === 'lesson' || p.type === 'browse') && !(H && gaveUpOnHelp(p.user, day)));
+    const candidates = plans.filter((p) => !p.user.isStaff && !p.user.persona && (p.type === 'lesson' || p.type === 'browse'));
     for (let i = 0; i < count && candidates.length; i += 1) {
       const plan = supRng.pick(candidates);
       const topics = supRng.chance(f) ? S.topicsAfter : S.topicsBefore;
@@ -1035,11 +1000,6 @@ export function simulate({ anchor, seed, scenario = undefined }) {
       const body = supRng.pick(SUPPORT_QUESTIONS[topic]);
       const delayHours = supRng.lognormal(lerp(S.replyMedianHoursBefore, S.replyMedianHoursAfter, S.slowdown ? ramp(day, S.slowdown.fromDay, S.slowdown.toDay) : 0), S.replySpread);
       (plan.supportAsks ??= []).push({ topic, body, delayHours });
-    }
-    const lena = H?.persona ? plans.find((p) => p.user.persona === 'lena' && p.helpScript?.[1] === 'ask') : null;
-    if (lena) {
-      const [, , topic, body, delayHours] = lena.helpScript;
-      (lena.supportAsks ??= []).push({ topic, body, delayHours });
     }
     if (S.personaQuestion && day === ANA_QUESTION.day) {
       const ana = plans.find((p) => p.user.persona === 'ana');
@@ -1051,7 +1011,6 @@ export function simulate({ anchor, seed, scenario = undefined }) {
   function supportVisit(plan, u, xApi, xThink, session, day) {
     const unread = (u.supportReplies ?? []).filter((n) => !n.read_at);
     const readsReply = unread.length > 0 && supRng.chance(0.75);
-    if (H && !readsReply && !plan.supportAsks?.length) helpVisit(plan, u, xApi, xThink, session, day);
     if (readsReply) {
       // the bell, then the reply notification, which opens the Help page
       xThink(2, 10);
@@ -1082,36 +1041,6 @@ export function simulate({ anchor, seed, scenario = undefined }) {
         _replyFromMs: createdMs + ask.delayHours * 3600_000, _learner: u,
       });
     }
-  }
-
-  // support.help: a visit to the Help page without a question to ask. A learner with a
-  // question of their own still open checks it; one who finds it open past
-  // giveUpAfterHours gives up on Help from today. Otherwise they look in now and then.
-  function helpVisit(plan, u, xApi, xThink, session, day) {
-    const look = () => {
-      xThink(5, 30);
-      session.page = '/help';
-      xApi('notifications', 'GET', '/api/me/support-requests', '/api/me/support-requests');
-      xThink(10, 60);
-    };
-    if (u.persona === 'lena') {
-      if (plan.helpScript?.[1] === 'check') look();
-      return;
-    }
-    if (u.persona) return;
-    if (gaveUpOnHelp(u, day)) {
-      if (helpRng.chance(H.visitShareGivenUp)) look();
-      return;
-    }
-    const open = supportRequests.filter((r) => r._learner === u && r.status === 'open');
-    if (open.length) {
-      if (!helpRng.chance(H.checkShare)) return;
-      look();
-      const waited = session.clock() - Math.min(...open.map((r) => Date.parse(r.created_at)));
-      if (waited > H.giveUpAfterHours * 3600_000) u.helpGaveUpDay = Math.min(u.helpGaveUpDay ?? day, day);
-      return;
-    }
-    if (helpRng.chance(H.visitShare)) look();
   }
 
   // A staff member on the Admin page answers every open question whose reply time has come, oldest first.
@@ -1145,9 +1074,18 @@ export function simulate({ anchor, seed, scenario = undefined }) {
     }
   }
 
+  // ---------------------------------------------------------------- enterprise accounts (after the 60 days, own streams)
+  const compliance = P.compliance ? runCompliance({
+    C: P.compliance, seed, anchorMs, learners, staff, courses, courseByKey, lessonsByCourse, quizResults, notifications, requests,
+    versionAt, latencyNoise, usedIds, quizScore,
+  }) : null;
+
   // ---------------------------------------------------------------- end state
   const users = [...staff, ...learners]
-    .map((u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, created_at: u.created_at }))
+    .map((u) => ({
+      id: u.id, email: u.email, name: u.name, role: u.role, created_at: u.created_at,
+      ...(u.organizationId ? { organization_id: u.organizationId, manager_id: u.managerId, department: u.department } : {}),
+    }))
     .sort((a, b) => a.id.localeCompare(b.id));
   const progress = { lessons: [], courses: [] };
   for (const u of [...learners].sort((a, b) => a.id.localeCompare(b.id))) {
@@ -1168,6 +1106,7 @@ export function simulate({ anchor, seed, scenario = undefined }) {
     support_requests: supportRequests
       .map(({ _replyFromMs, _learner, ...r }) => r)
       .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)),
+    ...(compliance ? { organizations: compliance.organizations, training_assignments: compliance.assignments } : {}),
   };
 
   requests.sort((a, b) => a.ts - b.ts);
@@ -1175,6 +1114,8 @@ export function simulate({ anchor, seed, scenario = undefined }) {
   return {
     anchorMs, data, requests, systemEvents, versions, learners, staff, scenario: def,
     slowRelease: slowRelease ? { version: slowRelease.version, from: iso(slowRelease.fromMs) } : null,
+    compliance: compliance ? compliance.view : null,
+    activityNotifications: compliance ? compliance.activityNotifications : new Map(),
     groups: {
       cohortA: cohortA.map((u) => u.id), cohortB: cohortB.map((u) => u.id), cohortC: cohortC.map((u) => u.id),
       lostAfterOutage: lost.map((u) => u.id),

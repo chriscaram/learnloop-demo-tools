@@ -13,13 +13,21 @@
 // learning, catalog and admin capabilities (one service = one capability, the
 // declared_in_code mapping).
 //
+// Since 2026-11-16 it also replays what the agent's application-log read (S2,
+// aggregate_app_logs) counts for the manual follow-up rule: each stage's application-log
+// lines, emitted exactly as seed:upload writes them, go through
+// business-data/follow-up-patterns.js over the job's own 30-day windows (the current one at
+// every read, the earlier one once at onboarding), and the stored counts reach
+// observationsForGoal as drift/index.js#loadDriftWorld assembles them.
+//
 // Start dates on all seven weekdays.
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stageView } from '../src/generate.js';
+import { PLACEHOLDER_DISTRIBUTION_DOMAIN, PLACEHOLDER_DISTRIBUTION_ID, stageView, stageWithhold } from '../src/generate.js';
+import { emitLogs } from '../src/emit.js';
 import { DAY_MS, simulate } from '../src/model.js';
 import { canonicalJson, getScenario, stageOf } from '../src/scenarios.js';
 
@@ -53,6 +61,8 @@ before(async () => {
     funnels: await load('packages/modules/new-evolution-opportunity/drift/funnels.js'),
     cohorts: await load('packages/modules/new-evolution-opportunity/drift/cohorts.js'),
     telemetry: await load('packages/platform/telemetry/index.js'),
+    followUpPatterns: await load('packages/platform/business-data/follow-up-patterns.js'),
+    followUp: await load('packages/modules/new-evolution-opportunity/drift/follow-up.js'),
   };
 });
 
@@ -81,7 +91,21 @@ function aggregates(requests, window) {
   }));
 }
 
-function detect(rows, capabilities) {
+/** The app-log read windows of aggregate_app_logs (backend log-routes-job.js logWindowFor): 30 days ending today 00:00 UTC. */
+function logWindow(anchor, back = 0) {
+  const end = Date.parse(`${anchor}T00:00:00Z`) - back * 30 * DAY_MS;
+  return { start: new Date(end - 30 * DAY_MS).toISOString(), end: new Date(end).toISOString() };
+}
+
+/** One follow-up read of the stage's application logs, stored the way the job stores it. */
+function followUpRead(appLogs, window, knownRoutes) {
+  const agg = ga.followUpPatterns.createFollowUpAggregator({ window, knownRoutes });
+  for (const text of appLogs.values()) for (const line of text.split('\n')) agg.add(line);
+  const result = ga.followUpPatterns.assertFollowUpAggregateOnly(agg.result());
+  return { window_start: window.start, window_end: window.end, partial: 0, days_with_lines: result.days_with_lines, patterns: result.patterns, signal_id: 'sig_app_logs' };
+}
+
+function detect(rows, capabilities, followUpRows = []) {
   const { det, usage: U, decompose, funnels, cohorts } = ga;
   const usageByWindow = new Map(det.USAGE_WINDOWS.map((w) => [w, U.usageByCapability(capabilities, rows, { windowDays: w, sourceDays: {}, partialDays: {} }).usage]));
   const { byCapability } = U.groupRoutesByCapability(rows);
@@ -103,8 +127,16 @@ function detect(rows, capabilities) {
     application_id: 'app_test', goals: GOALS, capabilities, usageByWindow, dayMaps, actorWindows, routeActorWindows,
     funnels: built.funnels, funnel_truncation: built.truncated, funnel_roots: built.roots, signalsById: new Map(), signals: [],
     cohortObservations: new Map(), cohortAvailability: cohorts.cohortDataAvailability([]), cohortScan: [], countries: [], unmapped_routes: [], measured_capabilities: 0,
+    followUps: ga.followUp.followUpSeriesByCapability(followUpRows, ga.followUp.routeCapabilityMap(rows)),
   };
-  return GOALS.flatMap((goal) => det.observationsForGoal(goal, world).observations.map((o) => ({ goal: goal.goal_id, code: o.code, fingerprint: canonicalJson(o.fingerprint ?? {}), facts: o.facts })));
+  const standDowns = [];
+  const observations = GOALS.flatMap((goal) => {
+    const r = det.observationsForGoal(goal, world);
+    standDowns.push(...r.stood_down.filter((s) => s.code === 'NBF-USAGE-MANUAL_FOLLOW_UP'));
+    return r.observations.map((o) => ({ goal: goal.goal_id, code: o.code, fingerprint: canonicalJson(o.fingerprint ?? {}), facts: o.facts, signal_ids: o.signal_ids }));
+  });
+  observations.standDowns = standDowns;
+  return observations;
 }
 
 /** The three reads of the staged reveal (onboarding with the history read, then one per stage), detected after each. */
@@ -115,6 +147,7 @@ function detectStages(def, anchor) {
   const current = ga.telemetry.telemetryWindow({ asOf: anchor, days: 30 });
   const history = ga.telemetry.telemetryWindow({ asOf: new Date(Date.parse(`${current.start}T00:00:00Z`) - DAY_MS).toISOString(), days: 30 });
   const rows = [];
+  const followUpRows = [];
   let clock = Date.parse('2030-01-01T00:00:00Z');
   const read = (requests, window) => {
     for (const aggregate of aggregates(requests, window)) {
@@ -128,40 +161,82 @@ function detectStages(def, anchor) {
   };
   const seen = [];
   for (const stage of [1, 2, 3]) {
-    const { requests } = stageView(sim, stageOf(def, stage));
+    const st = stageOf(def, stage);
+    const { requests } = stageView(sim, st);
     read(requests, current);
     if (stage === 1) read(requests, history); // the history read happens once, at onboarding
-    seen.push(detect(rows, capabilities));
+    // The application logs of the same stage, as seed:upload writes them, read by the
+    // follow-up aggregator over the job's windows (current every time, earlier once).
+    const { appLogs } = emitLogs(sim, {
+      salt: 'harness-salt', seed: 42, distributionId: PLACEHOLDER_DISTRIBUTION_ID, distributionDomain: PLACEHOLDER_DISTRIBUTION_DOMAIN,
+      withhold: stageWithhold(sim, st),
+    });
+    const knownRoutes = [...new Set(rows.map((r) => r.scope_key))];
+    const reads = stage === 1 ? [logWindow(anchor), logWindow(anchor, 1)] : [logWindow(anchor)];
+    for (const w of reads) {
+      clock += 5;
+      followUpRows.push({ ...followUpRead(appLogs, w, knownRoutes), created_at: new Date(clock).toISOString() });
+    }
+    seen.push(detect(rows, capabilities, followUpRows));
   }
   return seen;
 }
 
-test('the agent\'s own detectors: stage 1 raises the lesson finding only, stage 2 adds the enrol finding, stage 3 (compliance) raises nothing new, nothing earlier changes', { skip }, () => {
+const FOLLOW_UP = 'NBF-USAGE-MANUAL_FOLLOW_UP';
+const key = (o) => `${o.goal}|${o.code}|${o.fingerprint}`;
+
+// detectStages is the expensive part (three log emissions per start date); both tests below
+// read the full scenario's stages, so they share one computation per start date.
+const staged = new Map();
+const stagesOf = (def, anchor) => {
+  const k = `${def.id}|${def.parameters?.compliance === null ? 'nocompliance' : 'full'}|${anchor}`;
+  if (!staged.has(k)) staged.set(k, detectStages(def, anchor));
+  return staged.get(k);
+};
+
+test('the agent\'s own detectors: stage 1 raises the lesson finding only, stage 2 adds the enrol finding, stage 3 adds the manual follow-up finding, nothing earlier changes', { skip }, () => {
   const def = getScenario('q4-three-signals');
   for (const anchor of ANCHORS) {
-    const seen = detectStages(def, anchor);
+    const seen = stagesOf(def, anchor);
     const actor = (list, goal) => list.filter((o) => o.goal === goal && o.code === 'NBF-USAGE-ACTOR_INACTIVITY');
     const goalsWith = (list) => [...new Set(list.map((o) => o.goal))].sort();
     const [s1, s2, s3] = seen;
-    // stage 1: lessons only, and nothing at all about the store or Help
+    // stage 1: lessons only, and nothing at all about the store or the required training
     assert.deepEqual(goalsWith(s1), ['g_learn'], `${anchor} stage 1: ${JSON.stringify(s1.map((o) => [o.goal, o.code]))}`);
     assert.equal(actor(s1, 'g_learn').length, 1);
     assert.ok(actor(s1, 'g_learn')[0].facts.inactive_routes.some((r) => r.route === '/api/lessons/{lessonId}'));
-    // stage 2: the enrolment finding is added; nothing about Help yet
+    // stage 2: the enrolment finding is added; nothing about the required training yet
     assert.deepEqual(goalsWith(s2), ['g_cart', 'g_learn'], `${anchor} stage 2`);
     const enrol = actor(s2, 'g_cart')[0].facts.inactive_routes;
     assert.deepEqual(enrol.map((r) => r.route), ['/api/courses/{courseId}/enrol'], `${anchor} stage 2: ${JSON.stringify(enrol)}`);
     assert.ok(enrol[0].earlier_actors >= 200 && enrol[0].drop_pct >= 33, `${anchor} stage 2: ${JSON.stringify(enrol)}`);
-    // stage 3: the compliance case raises nothing with today's detectors (docs/signal-spec.md
-    // says why): the same two goals, the same observations, nothing on the admin or
-    // notifications capabilities
-    assert.deepEqual(goalsWith(s3), ['g_cart', 'g_learn'], `${anchor} stage 3: ${JSON.stringify(s3.filter((o) => !['g_cart', 'g_learn'].includes(o.goal)).map((o) => [o.goal, o.code]))}`);
-    assert.deepEqual(s3.map((o) => `${o.goal}|${o.code}|${o.fingerprint}`).sort(), s2.map((o) => `${o.goal}|${o.code}|${o.fingerprint}`).sort(), `${anchor} stage 3 = stage 2`);
-    for (const list of seen) assert.ok(!list.some((o) => o.goal === 'g_compliance'), `${anchor}: nothing about the compliance goal`);
+    // stages 1 and 2: the follow-up pattern is SEEN (the staff's ordinary reminders) and the
+    // rule stands down on the growth bar, by name — it is not silent for lack of data
+    for (const [list, n] of [[s1, 1], [s2, 2]]) {
+      assert.ok(!list.some((o) => o.code === FOLLOW_UP), `${anchor} stage ${n}: no manual follow-up finding`);
+      const reasons = list.standDowns.filter((d) => d.goal_id === 'g_compliance').map((d) => d.reason);
+      assert.equal(reasons.length, 1, `${anchor} stage ${n}: one stand-down on the compliance goal`);
+      assert.ok(['follow_up_not_growing', 'follow_up_too_few_messages'].includes(reasons[0]), `${anchor} stage ${n}: ${reasons[0]}`);
+      const figures = list.standDowns.find((d) => d.goal_id === 'g_compliance').figures;
+      assert.ok(figures.growth_ratio < 1.6, `${anchor} stage ${n}: growth ${figures.growth_ratio} far under the 2x bar`);
+    }
+    // stage 3: exactly stage 2 plus ONE manual follow-up finding, on the compliance goal and
+    // the admin capability (where the staff's look-ups live)
+    const added = s3.filter((o) => !new Set(s2.map(key)).has(key(o)));
+    assert.deepEqual(added.map((o) => `${o.goal}|${o.code}`), [`g_compliance|${FOLLOW_UP}`], `${anchor} stage 3 adds: ${JSON.stringify(added.map((o) => [o.goal, o.code]))}`);
+    const f = added[0].facts;
+    assert.equal(f.lookup_route, '/api/admin/learners/{userId}/training', anchor);
+    assert.equal(f.contact_event, 'staff_message_sent', anchor);
+    assert.equal(f.operators, 3, `${anchor}: the three staff`);
+    assert.ok(f.growth_ratio >= 2.5, `${anchor}: growth ${f.growth_ratio}`);
+    assert.ok(f.paired_pct >= 90, `${anchor}: paired ${f.paired_pct}`);
+    assert.ok(f.response_improvement_z === null || f.response_improvement_z < 1.645, `${anchor}: z ${f.response_improvement_z}`);
+    assert.ok(added[0].signal_ids.includes('sig_app_logs'), `${anchor}: the app-log read is cited (rule 12)`);
+    assert.deepEqual(f.not_measured, ['message_wording', 'what_was_chased', 'whether_the_task_was_done', 'deadlines', 'groups']);
     // every observation of a stage is still there, with the same fingerprint, in the next
     for (const [before, after, n] of [[s1, s2, 2], [s2, s3, 3]]) {
-      const later = new Set(after.map((o) => `${o.goal}|${o.code}|${o.fingerprint}`));
-      for (const o of before) assert.ok(later.has(`${o.goal}|${o.code}|${o.fingerprint}`), `${anchor} stage ${n} keeps ${o.goal} ${o.code} ${o.fingerprint}`);
+      const later = new Set(after.map(key));
+      for (const o of before) assert.ok(later.has(key(o)), `${anchor} stage ${n} keeps ${o.goal} ${o.code} ${o.fingerprint}`);
     }
   }
 });
@@ -170,7 +245,8 @@ test('the agent\'s own detectors: stage 1 raises the lesson finding only, stage 
 // agent finds exactly the same things about lessons and enrolment (same codes, fingerprints,
 // and the same inactive lesson and enrol routes with the same numbers). Its only footprint on
 // those capabilities is the quiz route (employees retaking quizzes) and, through it, the
-// learning goal's daily request trend; both are disclosed in docs/signal-spec.md.
+// learning goal's daily request trend; both are disclosed in docs/signal-spec.md. Without it
+// there is no follow-up surge, so the manual follow-up rule never fires in any stage.
 test('the compliance case leaves the lesson and enrol findings as they are, in every stage', { skip }, () => {
   const def = getScenario('q4-three-signals');
   const without = { ...def, parameters: { ...def.parameters, compliance: null } };
@@ -179,10 +255,13 @@ test('the compliance case leaves the lesson and enrol findings as they are, in e
     goal: o.goal, fingerprint: o.fingerprint, routes: o.facts.inactive_routes.filter((r) => LESSON_AND_ENROL.has(r.route)),
   }));
   for (const anchor of ['2026-11-15', '2026-11-18', '2026-11-21']) {
-    const [a, b] = [detectStages(def, anchor), detectStages(without, anchor)];
+    const [a, b] = [stagesOf(def, anchor), stagesOf(without, anchor)];
+    const others = (list) => list.filter((o) => o.code !== FOLLOW_UP).map((o) => `${o.goal}|${o.code}`).sort();
     for (let i = 0; i < 3; i += 1) {
       assert.deepEqual(view(a[i]), view(b[i]), `${anchor} stage ${i + 1}: the inactivity findings`);
-      assert.deepEqual(a[i].map((o) => `${o.goal}|${o.code}`).sort(), b[i].map((o) => `${o.goal}|${o.code}`).sort(), `${anchor} stage ${i + 1}: the same observations`);
+      assert.deepEqual(others(a[i]), others(b[i]), `${anchor} stage ${i + 1}: the same observations`);
+      assert.ok(!b[i].some((o) => o.code === FOLLOW_UP), `${anchor} stage ${i + 1}: no follow-up finding without the compliance case`);
     }
   }
 });
+

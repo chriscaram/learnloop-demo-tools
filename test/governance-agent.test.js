@@ -63,6 +63,7 @@ before(async () => {
     telemetry: await load('packages/platform/telemetry/index.js'),
     followUpPatterns: await load('packages/platform/business-data/follow-up-patterns.js'),
     followUp: await load('packages/modules/new-evolution-opportunity/drift/follow-up.js'),
+    records: await load('packages/platform/business-data/application-records.js'),
   };
 });
 
@@ -105,7 +106,19 @@ function followUpRead(appLogs, window, knownRoutes) {
   return { window_start: window.start, window_end: window.end, partial: 0, days_with_lines: result.days_with_lines, patterns: result.patterns, signal_id: 'sig_app_logs' };
 }
 
-function detect(rows, capabilities, followUpRows = []) {
+/**
+ * The agent's read of LearnLoop's state documents (owner decision 2026-11-17): the stage's
+ * starting state, as seed:upload writes it under state/, through the agent's own records
+ * aggregator with the default (LearnLoop-shaped) declaration, read on the start date.
+ */
+function recordsRead(data, anchor) {
+  const declaration = ga.records.validateRecordDeclaration({ bucket: 'learnloop-prod-state-000000000000', prefix: 'state/' });
+  const documents = Object.fromEntries(Object.entries(data).map(([k, v]) => [`${k}.json`, v]));
+  const agg = ga.records.assertRecordAggregateOnly(ga.records.aggregateDeadlineRecords(documents, declaration, { now: `${anchor}T00:00:00.000Z` }));
+  return { ...agg, signal_id: 'sig_records' };
+}
+
+function detect(rows, capabilities, followUpRows = [], applicationRecords = null) {
   const { det, usage: U, decompose, funnels, cohorts } = ga;
   const usageByWindow = new Map(det.USAGE_WINDOWS.map((w) => [w, U.usageByCapability(capabilities, rows, { windowDays: w, sourceDays: {}, partialDays: {} }).usage]));
   const { byCapability } = U.groupRoutesByCapability(rows);
@@ -128,6 +141,7 @@ function detect(rows, capabilities, followUpRows = []) {
     funnels: built.funnels, funnel_truncation: built.truncated, funnel_roots: built.roots, signalsById: new Map(), signals: [],
     cohortObservations: new Map(), cohortAvailability: cohorts.cohortDataAvailability([]), cohortScan: [], countries: [], unmapped_routes: [], measured_capabilities: 0,
     followUps: ga.followUp.followUpSeriesByCapability(followUpRows, ga.followUp.routeCapabilityMap(rows)),
+    applicationRecords,
   };
   const standDowns = [];
   const observations = GOALS.flatMap((goal) => {
@@ -162,7 +176,7 @@ function detectStages(def, anchor) {
   const seen = [];
   for (const stage of [1, 2, 3]) {
     const st = stageOf(def, stage);
-    const { requests } = stageView(sim, st);
+    const { requests, data } = stageView(sim, st);
     read(requests, current);
     if (stage === 1) read(requests, history); // the history read happens once, at onboarding
     // The application logs of the same stage, as seed:upload writes them, read by the
@@ -177,7 +191,7 @@ function detectStages(def, anchor) {
       clock += 5;
       followUpRows.push({ ...followUpRead(appLogs, w, knownRoutes), created_at: new Date(clock).toISOString() });
     }
-    seen.push(detect(rows, capabilities, followUpRows));
+    seen.push(detect(rows, capabilities, followUpRows, recordsRead(data, anchor)));
   }
   return seen;
 }
@@ -232,7 +246,18 @@ test('the agent\'s own detectors: stage 1 raises the lesson finding only, stage 
     assert.ok(f.paired_pct >= 90, `${anchor}: paired ${f.paired_pct}`);
     assert.ok(f.response_improvement_z === null || f.response_improvement_z < 1.645, `${anchor}: z ${f.response_improvement_z}`);
     assert.ok(added[0].signal_ids.includes('sig_app_logs'), `${anchor}: the app-log read is cited (rule 12)`);
-    assert.deepEqual(f.not_measured, ['message_wording', 'what_was_chased', 'whether_the_task_was_done', 'deadlines', 'groups']);
+    // ...and with LearnLoop's records read: the outcome per deadline is flat, the overdue work
+    // sits in the three behind teams, and only the message bodies stay unread.
+    const r = f.records;
+    assert.ok(r, `${anchor}: the records reached the finding`);
+    assert.equal(r.on_time_pct_by_deadline.length, 3, `${anchor}: the three past deadlines`);
+    assert.ok(Math.abs(r.outcome_change_pts) <= 10, `${anchor}: on time ${r.on_time_pct_by_deadline}`);
+    assert.ok(r.on_time_pct_overall >= 50 && r.on_time_pct_overall <= 75, `${anchor}: ${r.on_time_pct_overall}`);
+    assert.deepEqual(r.behind_teams.map((t) => t.label).sort(), ['Patient services', 'Retail branches', 'Warehouse operations'], `${anchor}: ${JSON.stringify(r.behind_teams)}`);
+    assert.ok(r.behind_share_of_overdue_pct >= 60, `${anchor}: ${r.behind_share_of_overdue_pct}`);
+    assert.ok(r.at_risk >= 60, `${anchor}: at risk ${r.at_risk}`);
+    assert.ok(added[0].signal_ids.includes('sig_records'), `${anchor}: the records read is cited (rule 12)`);
+    assert.deepEqual(f.not_measured, ['message_wording']);
     // every observation of a stage is still there, with the same fingerprint, in the next
     for (const [before, after, n] of [[s1, s2, 2], [s2, s3, 3]]) {
       const later = new Set(after.map(key));

@@ -21,6 +21,11 @@
         <span><strong>Rehearsal</strong> (dry run): show everything, write nothing to AWS or GitHub</span>
       </label>
     </div>
+    <fieldset class="targets">
+      <legend>Load into</legend>
+      <div id="targets" class="target-list"></div>
+      <p class="hint">Each LearnLoop deployment has its own buckets, its own pseudonym salt and its own stages: run the whole flow on Staging beforehand, then on Production. Publishing to LearnLoop's main is offered for Production only.</p>
+    </fieldset>
     <div class="loaded" id="loaded" aria-live="polite">Reading what is loaded now…</div>
     <div class="dry-indicator" id="dry-indicator" hidden>Rehearsal mode — nothing is written to AWS or GitHub.</div>
   </header>
@@ -38,7 +43,7 @@
       <h2>The sealed scenario</h2>
       <p class="purpose">Choose what the simulated learners will do. The Governance Agent is not told which one you chose: it only sees the activity, the way it would see a real customer's.</p>
       <div class="cards" id="cards" role="radiogroup" aria-label="Scenarios"></div>
-      <p class="business-review"><a class="button-link" id="business-review" href="#" download>Download the business review for this scenario</a> <span class="hint">The quarterly review the business would write for this situation. Upload it in the Governance Agent to create the goals; it never names the scenario. For a scenario revealed in stages, download and upload it once, at stage 1: it already holds every goal.</span></p>
+      <p class="business-review"><a class="button-link" id="business-review" href="#" download>Download the business review for this scenario</a> <span class="hint">The quarterly review the business would write for this situation. Upload it in the Governance Agent to create the goals; it never names the scenario. For a scenario revealed in stages, download and upload it once, when you onboard LearnLoop after loading the history: it already holds every goal.</span></p>
 
       <div class="seal">
         <div class="seal-text">
@@ -61,16 +66,21 @@
         <p class="next-step" id="next-step" hidden></p>
       </div>
       <div class="stage-controls" id="stage-controls" hidden>
-        <label class="publish-toggle">
-          <input type="checkbox" id="publish">
-          <span><strong>Also publish the starting state to LearnLoop</strong> (commit and push <code>data/seed/</code> to main, which starts LearnLoop's deploy)</span>
-        </label>
-        <p class="hint">Ticked by default only for the last stage. Upload already puts each stage's starting state where LearnLoop reads it in AWS. Publishing matters for later: LearnLoop's "Preview reset" restores the app's state from main, so main should hold the final state, and an earlier stage does not need a deploy in the middle of the demo.</p>
+        <div id="publish-choice">
+          <label class="publish-toggle">
+            <input type="checkbox" id="publish">
+            <span><strong>Also publish the starting state to LearnLoop</strong> (commit and push <code>data/seed/</code> to main, which starts LearnLoop's deploy)</span>
+          </label>
+          <p class="hint">Ticked by default only for the last stage. Upload already puts each stage's starting state where LearnLoop reads it in AWS. Publishing matters for later: LearnLoop's "Preview reset" restores the app's state from main, so main should hold the final state, and an earlier stage does not need a deploy in the middle of the demo. What is published is the stage's own starting state, not the live state with what the AI agents wrote.</p>
+        </div>
+        <p class="hint" id="publish-production-only" hidden>Publishing to LearnLoop's main is offered for Production only; Staging reads each load's state from its own state bucket.</p>
+        <p class="hint">The history replaces the app's state. Every later stage adds to the live state instead: what the app, its AI agents and you wrote since the last load (notifications, read marks, a cart checked out) stays as it is, and only the stage's new records are added.</p>
         <p class="hint" id="stage-anchor-note" hidden></p>
-        <p class="hint stage-caution">Until a case is loaded and read, do not use its part of LearnLoop yourself (the cart and the checkout before stage 2, an employee's Training and reminders in Admin before stage 3): your own visits today would be the only recent visits the agent sees on those pages.</p>
+        <p class="hint">Showing LearnLoop between two stages is safe, a learner's waiting cart included: each load first clears the web and application log files in the buckets, your own visits among them, so the next read sees only the stage's activity.</p>
+        <p class="hint stage-caution">After the last load, do not use LearnLoop until "Get usage telemetry" has finished: nothing clears your visits before that read.</p>
         <div class="start-over">
           <button type="button" id="start-over">Start over</button>
-          <span class="hint">Loads stage 1 again. Afterwards remove the LearnLoop application in the Governance Agent and onboard it again: it keeps the highest number of people it has read for every period, so an application that has read a later stage never shows these drops again.</span>
+          <span class="hint">Loads the history again, with today's date, and replaces the app's state. Afterwards remove the LearnLoop application in the Governance Agent and onboard it again: it keeps the highest number of people it has read for every period, so an application that has read a later stage never shows these drops again.</span>
         </div>
       </div>
       <details class="step-by-step">

@@ -6,10 +6,14 @@ const SVG = 'http://www.w3.org/2000/svg';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const shortDate = (iso) => { const d = new Date(`${iso.slice(0, 10)}T00:00:00Z`); return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`; };
 const longTime = (iso) => { const d = new Date(iso); return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}, ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
-const ACTION_LABELS = { clear: 'Clear old log files', generate: 'Generate', upload: 'Upload', verify: 'Verify', publish: 'Publish the starting state', load: 'Load this scenario', startOver: 'Start over with stage 1' };
+const ACTION_LABELS = { clear: 'Clear old log files', generate: 'Generate', upload: 'Upload', verify: 'Verify', publish: 'Publish the starting state', load: 'Load this scenario', startOver: 'Start over with the history' };
 const TARGET_LABELS = { cloudfront: 'Web access records', appLogs: 'Application records', state: "The app's starting state" };
 
-const ui = { scenarios: [], selected: null, confirmations: {}, stagedLoad: {}, running: false, state: null, defaultAnchor: null };
+const ui = { scenarios: [], selected: null, confirmations: {}, stagedLoad: {}, running: false, state: null, defaultAnchor: null, targets: [], target: 'production' };
+const hasStage = (stage) => stage !== null && stage !== undefined;
+/** The target chosen at the top of the page: { id, label, stack, publish }. */
+const target = () => ui.targets.find((t) => t.id === ui.target) ?? { id: 'production', label: 'Production', stack: 'LearnLoopProd', publish: true };
+const stageName = (n) => (n === 0 ? 'the history (stage 0)' : `stage ${n}`);
 
 // ------------------------------------------------------------------ helpers
 async function api(path, options = {}) {
@@ -59,12 +63,21 @@ function logLine(text, kind = '') {
 }
 
 // ------------------------------------------------------------------ 1. scenario cards and the seal
-// A combined scenario leads, full width, with the cases it prepares drawn inside it as
-// numbered boxes (what changes, and for whom). A staged one reveals them one load at a
-// time, and each box says whether its case is loaded, next, or not yet.
+// A combined scenario leads, full width, with its cases drawn inside it as numbered boxes
+// (what changes, and for whom). A staged one reveals them one load at a time, after the
+// history (stage 0, its own box), and each box says whether it is loaded, next, or not yet.
 const CASE_STATUS = { loaded: 'Loaded', next: 'Next', later: 'Not yet' };
-function caseBoxes(cases, statusOf = null) {
+function caseBoxes(cases, statusOf = null, withHistory = false) {
   const grid = el('div', { class: 'case-grid' });
+  if (withHistory) {
+    const status = statusOf ? statusOf(0) : null;
+    grid.append(el('div', { class: status ? `case case-history case-${status}` : 'case case-history' },
+      el('span', { class: 'case-num', text: '0' }),
+      ...(status ? [el('span', { class: `case-status ${status}`, text: CASE_STATUS[status] })] : []),
+      el('h4', { text: 'The history — before onboarding' }),
+      el('p', { text: 'The thirty days before the last month, final from the start, and the app as it is today, carts included. Load it, then onboard LearnLoop in the Governance Agent the same day: it reads this history once and finds nothing yet.' }),
+      el('p', { class: 'case-who', text: 'Everyone · nothing changes yet' })));
+  }
   cases.forEach((c, i) => {
     const status = statusOf ? statusOf(i + 1) : null;
     grid.append(el('div', { class: status ? `case case-${status}` : 'case' },
@@ -78,18 +91,21 @@ function caseBoxes(cases, statusOf = null) {
 }
 
 /**
- * Where the selected scenario's staged reveal stands, from what is loaded now:
- * { staged, count, loaded (0 = none of this scenario), next (stage to load, null when all
- * are), anchor (the start date the stages keep, or null) }.
+ * Where the selected scenario's staged reveal stands on the chosen target, from what is
+ * loaded now: { staged, count, first (0 with a history stage), loaded (the stage loaded, or
+ * null for none of this scenario), next (stage to load, null when all are), anchor (the
+ * start date the stages keep, or null) }.
  */
 function stagePlan() {
   const card = ui.scenarios.find((s) => s.id === ui.selected);
   const count = card?.stages ?? 0;
-  if (!count) return { staged: false, count: 0, loaded: 0, next: null, anchor: null };
+  const first = card?.firstStage ?? 1;
+  if (!count) return { staged: false, count: 0, first, loaded: null, next: null, anchor: null };
   // a rehearsal advances through the stages on its own record, never the real one
   const l = dryRun() ? ui.state?.dryRunGenerated : ui.state?.loaded;
-  const loaded = l && l.scenario === ui.selected && l.stage ? l.stage : 0;
-  return { staged: true, count, loaded, next: loaded >= count ? null : loaded + 1, anchor: loaded ? l.anchor : null };
+  const loaded = l && l.scenario === ui.selected && hasStage(l.stage) ? l.stage : null;
+  const next = loaded === null ? first : loaded >= count ? null : loaded + 1;
+  return { staged: true, count, first, loaded, next, anchor: loaded === null ? null : l.anchor };
 }
 /** The stage the buttons act on: the next one, or the last one when all are loaded. */
 const actionStage = (plan = stagePlan()) => (plan.staged ? plan.next ?? plan.count : null);
@@ -102,13 +118,13 @@ function renderCards() {
   const card = (s, isFeatured) => {
     const plan = s.id === ui.selected ? stagePlan() : null;
     const statusOf = s.stages && plan?.staged
-      ? (n) => (n <= plan.loaded ? 'loaded' : n === plan.next ? 'next' : 'later')
+      ? (n) => (plan.loaded !== null && n <= plan.loaded ? 'loaded' : n === plan.next ? 'next' : 'later')
       : null;
-    const countText = s.stages ? `${s.cases.length} cases, revealed one stage at a time` : `${s.cases?.length} cases, loaded together with one button`;
+    const countText = s.stages ? `${s.cases.length} cases, revealed one stage at a time${s.firstStage === 0 ? ', after the history' : ''}` : `${s.cases?.length} cases, loaded together with one button`;
     const node = el('button', { type: 'button', class: isFeatured ? 'card featured' : 'card', role: 'radio', 'aria-checked': String(s.id === ui.selected) },
       ...(isFeatured ? [el('span', { class: 'case-count', text: countText })] : []),
       el('h3', { text: s.title }), el('p', { text: s.description }),
-      ...(isFeatured ? [caseBoxes(s.cases, statusOf)] : []));
+      ...(isFeatured ? [caseBoxes(s.cases, statusOf, s.firstStage === 0)] : []));
     node.addEventListener('click', () => { ui.selected = s.id; renderCards(); renderStageControls(); updateFingerprint(); });
     return node;
   };
@@ -122,14 +138,14 @@ function renderCards() {
     download.toggleAttribute('aria-disabled', !ui.selected);
   }
 }
-const shownKey = (scenario, when, stage) => `${scenario}|${when}${stage ? `|${stage}` : ''}`;
+const shownKey = (scenario, when, stage) => `${scenario}|${when}${hasStage(stage) ? `|${stage}` : ''}`;
 async function updateFingerprint(stageOverride = null) {
   const box = $('#fingerprint');
   if (!ui.selected || !anchor()) { box.textContent = '—'; return; }
   const stage = stageOverride ?? actionStage();
   try {
-    const { fingerprint } = await api(`/api/fingerprint?scenario=${encodeURIComponent(ui.selected)}&anchor=${anchor()}${stage ? `&stage=${stage}` : ''}`);
-    box.replaceChildren(el('span', { class: 'label', text: stage ? `Fingerprint of stage ${stage} (SHA-256)` : 'Fingerprint (SHA-256)' }), document.createTextNode(grouped(fingerprint)));
+    const { fingerprint } = await api(`/api/fingerprint?scenario=${encodeURIComponent(ui.selected)}&anchor=${anchor()}${hasStage(stage) ? `&stage=${stage}` : ''}`);
+    box.replaceChildren(el('span', { class: 'label', text: hasStage(stage) ? `Fingerprint of ${stageName(stage)} (SHA-256)` : 'Fingerprint (SHA-256)' }), document.createTextNode(grouped(fingerprint)));
     const shown = JSON.parse(sessionStorage.getItem('shown') ?? '{}');
     shown[shownKey(ui.selected, anchor(), stage)] = { fingerprint, at: new Date().toISOString() };
     sessionStorage.setItem('shown', JSON.stringify(shown));
@@ -142,20 +158,27 @@ async function updateFingerprint(stageOverride = null) {
 async function refreshLoaded({ readBack = false } = {}) {
   const strip = $('#loaded');
   try {
-    const state = await api(`/api/state${readBack ? '?readBack=1' : ''}`);
+    const state = await api(`/api/state?target=${encodeURIComponent(ui.target)}${readBack ? '&readBack=1' : ''}`);
     ui.state = state;
     strip.replaceChildren();
     const l = state.loaded;
+    const where = `${target().label} (${target().stack})`;
     if (!l) {
-      strip.append(document.createTextNode('Nothing has been loaded into AWS from this computer yet.'));
+      strip.append(document.createTextNode(`${where}: nothing has been loaded from this computer yet.`));
     } else {
       const title = ui.scenarios.find((s) => s.id === l.scenario)?.title ?? l.scenario;
-      const stageText = l.stage ? ` · stage ${l.stage} of ${l.stages ?? '?'} (case${l.stage > 1 ? `s 1 to ${l.stage}` : ' 1'})` : '';
+      const stageText = !hasStage(l.stage) ? ''
+        : l.stage === 0 ? ' · the history (stage 0), before onboarding'
+          : ` · stage ${l.stage} of ${l.stages ?? '?'} (case${l.stage > 1 ? `s 1 to ${l.stage}` : ' 1'})`;
+      const stateText = l.state?.mode === 'merged'
+        ? ` · app state kept and added to (${fmt(l.state.added ?? 0)} records added, ${fmt(l.state.keptAppOnly ?? 0)} written by the app kept${l.state.conflicts ? `, ${fmt(l.state.conflicts)} left as the app has them` : ''})`
+        : l.state?.mode === 'replaced' ? ' · app state replaced' : '';
       strip.append(
-        document.createTextNode('Loaded now: '), el('strong', { text: title }),
+        document.createTextNode(`${where} · loaded now: `), el('strong', { text: title }),
         ...(stageText ? [el('strong', { class: 'loaded-stage', text: stageText })] : []),
-        document.createTextNode(` · start date ${l.anchor} · loaded ${longTime(l.at)} by “${ACTION_LABELS[l.by] ?? l.by}” · `),
-        document.createTextNode(l.published ? (l.published.skipped ? 'starting state already on LearnLoop main' : `starting state published ${longTime(l.published.at)} (${l.published.commit})`) : 'starting state not published yet'),
+        document.createTextNode(` · start date ${l.anchor} · loaded ${longTime(l.at)} by “${ACTION_LABELS[l.by] ?? l.by}”${stateText} · `),
+        document.createTextNode(!target().publish ? 'publishing to LearnLoop main is for Production only'
+          : l.published ? (l.published.skipped ? 'starting state already on LearnLoop main' : `starting state published ${longTime(l.published.at)} (${l.published.commit})`) : 'starting state not published yet'),
       );
     }
     if (state.buckets) {
@@ -182,54 +205,65 @@ function renderStageControls() {
   controls.hidden = !plan.staged;
   next.hidden = !plan.staged;
   const anchorInput = $('#anchor');
+  // publishing to LearnLoop's main is offered for Production only
+  $('#publish-choice').hidden = !target().publish;
+  $('#publish-production-only').hidden = target().publish;
+  $$('[data-action="publish"]').forEach((b) => { b.hidden = !target().publish; });
   if (!plan.staged) {
     button.textContent = 'Load this scenario';
     button.dataset.stage = '';
-    $('#load-hint').textContent = "Clears the old log files, generates the new activity, uploads it, reads it back and publishes the app's starting state. One confirmation.";
+    $('#load-hint').textContent = target().publish
+      ? "Clears the old log files, generates the new activity, uploads it, reads it back and publishes the app's starting state. One confirmation."
+      : 'Clears the old log files, generates the new activity, uploads it and reads it back. One confirmation.';
     anchorInput.disabled = false;
     $('#stage-anchor-note').hidden = true;
     return;
   }
   const stage = actionStage(plan);
+  const label = (n) => (n === 0 ? 'Load the history — before onboarding' : `Load stage ${n} — adds case ${n}`);
   button.dataset.stage = String(stage);
-  button.textContent = plan.next ? `Load stage ${plan.next} — adds case ${plan.next}` : `All ${plan.count} stages are loaded`;
-  button.toggleAttribute('data-all-loaded', !plan.next);
+  button.textContent = hasStage(plan.next) ? label(plan.next) : `All ${plan.count} stages are loaded`;
+  button.toggleAttribute('data-all-loaded', !hasStage(plan.next));
   // After a load the page shows "Where it lands"; the next stage's button lives in moment 1,
   // so this moment says what is next and takes the presenter back there.
   const landNext = $('#land-next');
-  landNext.hidden = !plan.loaded;
-  if (plan.loaded) {
-    const gaStep = plan.loaded === 1
-      ? 'onboard LearnLoop as a new application (connecting usage telemetry reads the data), upload the business review and confirm its three goals'
-      : 'Settings → Connections → Usage telemetry → Get usage telemetry';
-    $('#land-next-text').textContent = plan.next
-      ? `Stage ${plan.loaded} of ${plan.count} is loaded. In the Governance Agent: ${gaStep}. When its finding appears, come back here for stage ${plan.next}.`
-      : `All ${plan.count} stages are loaded. In the Governance Agent: Settings → Connections → Usage telemetry → Get usage telemetry. At the end of the demo, open the envelope.`;
-    $('#land-next-button').textContent = plan.next ? `Go to stage ${plan.next} — adds case ${plan.next}` : 'Open the envelope';
-    $('#land-next-button').onclick = () => showMoment(plan.next ? 'seal' : 'reveal');
+  landNext.hidden = plan.loaded === null;
+  if (plan.loaded !== null) {
+    $('#land-next-text').textContent = plan.loaded === 0
+      ? 'The history is loaded. Then onboard LearnLoop in the Governance Agent the same day: connect usage telemetry (its first read also reads the history), upload the business review and confirm its three goals. No finding is expected yet. Then come back here for stage 1.'
+      : hasStage(plan.next)
+        ? `Stage ${plan.loaded} of ${plan.count} is loaded. In the Governance Agent: Settings → Connections → Usage telemetry → Get usage telemetry. When its finding appears, come back here for stage ${plan.next}.`
+        : `All ${plan.count} stages are loaded. In the Governance Agent: Settings → Connections → Usage telemetry → Get usage telemetry. At the end of the demo, open the envelope.`;
+    $('#land-next-button').textContent = hasStage(plan.next) ? label(plan.next).replace(/^Load/, 'Go to') : 'Open the envelope';
+    $('#land-next-button').onclick = () => showMoment(hasStage(plan.next) ? 'seal' : 'reveal');
   }
-  if (!ui.running) button.disabled = !plan.next;
-  $('#load-hint').textContent = plan.next
-    ? `Clears the old log files, generates stage ${plan.next} of ${plan.count} (case${plan.next > 1 ? `s 1 to ${plan.next}` : ' 1'}), uploads it and reads it back${plan.next === plan.count ? ', then publishes the starting state' : ''}. One confirmation.`
-    : 'Every case is loaded. Start over below to present it again.';
+  if (!ui.running) button.disabled = !hasStage(plan.next);
+  const publishes = target().publish && plan.next === plan.count;
+  $('#load-hint').textContent = plan.next === 0
+    ? "Clears the old log files, generates the history (the thirty days before the last month, final from now on, and of the last month only what no case is about), uploads it with the app's starting state, which replaces the app's state, and reads it back. One confirmation."
+    : hasStage(plan.next)
+      ? `Clears the old log files, generates stage ${plan.next} of ${plan.count} (case${plan.next > 1 ? `s 1 to ${plan.next}` : ' 1'}), uploads it, adds its new records to the app's live state without changing anything the app or its AI agents wrote, and reads it back${publishes ? ', then publishes the starting state' : ''}. One confirmation.`
+      : 'Every case is loaded. Start over below to present it again.';
   // what the presenter does next in the Governance Agent
   next.replaceChildren();
-  if (plan.next === 1) {
+  if (plan.next === 0) {
+    next.append(el('strong', { text: 'Then onboard LearnLoop in the Governance Agent the same day' }), document.createTextNode(': connect usage telemetry (its first read also reads this history, once), upload the business review and confirm its three goals. The agent finds nothing yet.'));
+  } else if (plan.next === 1 && plan.first === 1) {
     next.append(el('strong', { text: 'Then, in the Governance Agent: ' }), document.createTextNode('onboard LearnLoop as a new application (connecting usage telemetry reads the data), upload the business review and confirm its three goals. The first finding follows.'));
-  } else if (plan.next) {
-    next.append(el('strong', { text: 'Then, in the Governance Agent: ' }), document.createTextNode(`Settings → Connections → Usage telemetry → Get usage telemetry. Case ${plan.next}'s finding appears beside the earlier one${plan.next > 2 ? 's' : ''}.`));
+  } else if (hasStage(plan.next)) {
+    next.append(el('strong', { text: 'Then, in the Governance Agent: ' }), document.createTextNode(`Settings → Connections → Usage telemetry → Get usage telemetry. Case ${plan.next}'s finding appears${plan.next > 1 ? ` beside the earlier one${plan.next > 2 ? 's' : ''}` : ''}.`));
   } else {
     next.append(el('strong', { text: 'In the Governance Agent: ' }), document.createTextNode('the three findings are there once the last read has finished.'));
   }
-  // stages 2 and 3 keep the start date of stage 1
+  // every later stage keeps the start date of the first one
   const note = $('#stage-anchor-note');
-  if (plan.loaded) {
+  if (plan.loaded !== null) {
     anchorInput.value = plan.anchor;
     anchorInput.disabled = true;
     note.hidden = false;
-    note.textContent = plan.next
-      ? `The start date stays ${plan.anchor}, the one stage 1 was loaded with: a stage only adds to the activity already loaded.`
-      : `All ${plan.count} stages were loaded with the start date ${plan.anchor}. Start over loads stage 1 with today's date.`;
+    note.textContent = hasStage(plan.next)
+      ? `The start date stays ${plan.anchor}, the one ${stageName(plan.first)} was loaded with: a stage only adds to the activity already loaded.`
+      : `All stages were loaded with the start date ${plan.anchor}. Start over loads ${stageName(plan.first)} with today's date.`;
   } else {
     anchorInput.disabled = false;
     note.hidden = true;
@@ -239,7 +273,8 @@ function renderStageControls() {
     ui.publishFor = stage;
     ui.publishTouched = false;
   }
-  $('#start-over').hidden = !plan.loaded;
+  $('#start-over').hidden = plan.loaded === null;
+  $('#start-over').textContent = plan.first === 0 ? 'Start over with the history' : 'Start over';
 }
 
 // ------------------------------------------------------------------ actions
@@ -258,13 +293,17 @@ async function runAction(action, { startOver = false } = {}) {
   if (ui.running) return;
   if (!ui.selected) { logLine('Choose a scenario first.', 'error'); return; }
   const plan = stagePlan();
-  const stage = startOver ? 1 : actionStage(plan);
-  const publish = plan.staged && action === 'load' ? (startOver ? false : $('#publish').checked) : undefined;
+  const stage = startOver ? plan.first : actionStage(plan);
+  const publish = plan.staged && action === 'load' && target().publish ? (startOver ? false : $('#publish').checked) : undefined;
   if (startOver) $('#anchor').value = ui.defaultAnchor ?? anchor();
   let text = null;
+  const into = `Into ${target().label} (${target().stack}).`;
   if (plan.staged && action === 'load') {
-    text = startOver ? ui.stagedLoad.startOver
-      : `Stage ${stage} of ${plan.count}. ${publish ? ui.stagedLoad.publish : ui.stagedLoad.noPublish}`;
+    text = startOver ? `${into} ${ui.stagedLoad.startOver}`
+      : stage === 0 ? `${into} The history, before onboarding. ${ui.stagedLoad.history}`
+        : `${into} Stage ${stage} of ${plan.count}. ${publish ? ui.stagedLoad.publish : ui.stagedLoad.noPublish}`;
+  } else if (ui.confirmations[action]) {
+    text = `${into} ${ui.confirmations[action]}`;
   }
   let token;
   if (ui.confirmations[action]) {
@@ -273,21 +312,21 @@ async function runAction(action, { startOver = false } = {}) {
       ({ token } = await api('/api/confirm', { method: 'POST', body: JSON.stringify({ action }) }));
     } catch (error) { logLine(error.message, 'error'); return; }
   }
-  if (startOver) await updateFingerprint(1); // the seal shows the stage being loaded
+  if (startOver) await updateFingerprint(plan.first); // the seal shows the stage being loaded
   let started;
   try {
-    started = await api(`/api/actions/${action}`, { method: 'POST', body: JSON.stringify({ scenario: ui.selected, stage: stage ?? undefined, anchor: anchor(), dryRun: dryRun(), publish, token, pace: new URLSearchParams(location.search).get('pace') === 'fast' ? 'fast' : undefined }) });
+    started = await api(`/api/actions/${action}`, { method: 'POST', body: JSON.stringify({ target: ui.target, scenario: ui.selected, stage: stage ?? undefined, anchor: anchor(), dryRun: dryRun(), publish, token, pace: new URLSearchParams(location.search).get('pace') === 'fast' ? 'fast' : undefined }) });
   } catch (error) { logLine(error.message, 'error'); return; }
   setRunning(true);
   ui.runDry = started.dryRun;
   $('#run-log').replaceChildren();
-  logLine(`${ACTION_LABELS[action]}${stage ? ` (stage ${stage})` : ''}${started.dryRun ? ' (rehearsal)' : ''}: started.`, 'note');
+  logLine(`${ACTION_LABELS[action]}${hasStage(stage) ? ` (${stageName(stage)})` : ''} into ${target().label}${started.dryRun ? ' (rehearsal)' : ''}: started.`, 'note');
   follow(started.runId);
 }
 
 function setRunning(on) {
   ui.running = on;
-  for (const b of [...$$('[data-action]'), $('#load'), $('#replay'), $('#start-over')]) b.disabled = on;
+  for (const b of [...$$('[data-action]'), $('#load'), $('#replay'), $('#start-over'), ...$$('input[name="target"]')]) b.disabled = on;
   if (!on && $('#load').hasAttribute('data-all-loaded')) $('#load').disabled = true;
 }
 /** After an action: what is loaded now, and everything that depends on it. */
@@ -315,6 +354,7 @@ function handleEvent(e, source) {
       }
       break;
     case 'note': logLine(e.message, 'note'); break;
+    case 'merge': logLine(e.sentence, e.totals?.conflicts ? 'note' : ''); break;
     case 'generated':
       showMoment('generate');
       startChart({ scales: e.scales, label: null });
@@ -439,7 +479,7 @@ function drawChart() {
 
 async function replay() {
   try {
-    const { replay: last } = await api('/api/replay');
+    const { replay: last } = await api(`/api/replay?target=${encodeURIComponent(ui.target)}`);
     if (!last) { logLine('There is no loaded run to replay yet.', 'note'); return; }
     const max = (k) => Math.max(0, ...last.daily.map((d) => d[k] ?? 0));
     const title = ui.scenarios.find((s) => s.id === last.scenario)?.title ?? last.scenario;
@@ -487,16 +527,16 @@ function showSample(e) {
 // ------------------------------------------------------------------ 4. open the envelope
 async function openEnvelope() {
   const loaded = ui.state?.loaded;
-  const target = dryRun() ? ui.state?.dryRunGenerated ?? null : loaded;
-  const scenario = target?.scenario ?? ui.selected;
-  const when = target?.anchor ?? anchor();
-  const stage = target?.scenario === scenario ? target?.stage ?? null : null;
+  const record = dryRun() ? ui.state?.dryRunGenerated ?? null : loaded;
+  const scenario = record?.scenario ?? ui.selected;
+  const when = record?.anchor ?? anchor();
+  const stage = record?.scenario === scenario ? record?.stage ?? null : null;
   try {
     const reveal = await api(`/api/scenarios/${scenario}/reveal?anchor=${when}`);
-    const sealed = { anchor: reveal.anchor, scenario: reveal.definition, seed: reveal.seed, ...(stage ? { stage } : {}) };
+    const sealed = { anchor: reveal.anchor, scenario: reveal.definition, seed: reveal.seed, ...(hasStage(stage) ? { stage } : {}) };
     const recomputed = await sha256(canonicalJson(sealed));
     const shown = JSON.parse(sessionStorage.getItem('shown') ?? '{}')[shownKey(scenario, when, stage)];
-    const reference = shown?.fingerprint ?? target?.fingerprint ?? null;
+    const reference = shown?.fingerprint ?? record?.fingerprint ?? null;
     const box = $('#match');
     box.replaceChildren();
     if (!reference) {
@@ -523,11 +563,11 @@ async function openEnvelope() {
       ? 'Checked in advance against the Governance Agent\'s own detection rules and thresholds (see Technical details).'
       : `Experimental: ${reveal.definition.experimental_reason}`;
     $('#reveal-verified').replaceChildren(...(reveal.definition.verified_against ?? []).map((v) => el('li', {}, el('code', { text: v.file }), document.createTextNode(` — ${v.threshold}`))));
-    $('#reveal-canonical').textContent = stage ? reveal.stages.find((x) => x.stage === stage).canonical : reveal.canonical;
+    $('#reveal-canonical').textContent = hasStage(stage) ? reveal.stages.find((x) => x.stage === stage).canonical : reveal.canonical;
     // a staged scenario: every stage, its fingerprint, and which are loaded
     $('#reveal-stages').hidden = !reveal.stages;
-    $('#reveal-stage-list').replaceChildren(...(reveal.stages ?? []).map((x) => el('li', { class: stage && x.stage <= stage ? 'stage-loaded' : '' },
-      el('strong', { text: `Stage ${x.stage}${stage ? (x.stage <= stage ? ' — loaded' : ' — not loaded') : ''}` }),
+    $('#reveal-stage-list').replaceChildren(...(reveal.stages ?? []).map((x) => el('li', { class: hasStage(stage) && x.stage <= stage ? 'stage-loaded' : '' },
+      el('strong', { text: `${x.stage === 0 ? 'Stage 0, the history' : `Stage ${x.stage}`}${hasStage(stage) ? (x.stage <= stage ? ' — loaded' : ' — not loaded') : ''}` }),
       el('span', { class: 'fp', text: `Fingerprint: ${grouped(x.fingerprint)}${x.stage === stage ? (x.fingerprint === recomputed ? ' (the one loaded, recomputed above)' : ' (does not match the one recomputed above)') : ''}` }),
       el('ul', {}, ...x.lines.map((t) => el('li', { text: t }))))));
     $('#envelope').hidden = false;
@@ -536,6 +576,28 @@ async function openEnvelope() {
     $('#match').textContent = error.message;
     $('#envelope').hidden = false;
   }
+}
+
+// ------------------------------------------------------------------ the target
+// Production or Staging: which LearnLoop deployment (CloudFormation stack) every action
+// loads into. Each has its own buckets, salt and stage progression.
+function renderTargets() {
+  const host = $('#targets');
+  host.replaceChildren(...ui.targets.map((t) => {
+    const input = el('input', { type: 'radio', name: 'target', value: t.id });
+    input.checked = t.id === ui.target;
+    input.addEventListener('change', async () => {
+      if (ui.running) { input.checked = false; return; }
+      ui.target = t.id;
+      localStorage.setItem('target', t.id);
+      ui.publishTouched = false;
+      await refreshLoaded();
+      renderCards();
+      renderStageControls();
+      await updateFingerprint();
+    });
+    return el('label', { class: 'target-choice' }, input, el('span', {}, el('strong', { text: t.label }), document.createTextNode(` ${t.stack}`)));
+  }));
 }
 
 // ------------------------------------------------------------------ start
@@ -549,7 +611,11 @@ async function init() {
   $('#open-envelope').addEventListener('click', openEnvelope);
   $('#anchor').addEventListener('change', updateFingerprint);
   $('#dry-run').addEventListener('change', () => { $('#dry-indicator').hidden = !dryRun(); renderCards(); renderStageControls(); updateFingerprint(); });
-  const { scenarios, defaultAnchor, seed, confirmations, stagedLoad } = await api('/api/scenarios');
+  const { scenarios, defaultAnchor, seed, confirmations, stagedLoad, targets, defaultTarget } = await api('/api/scenarios');
+  ui.targets = targets ?? [];
+  const saved = localStorage.getItem('target');
+  ui.target = ui.targets.some((t) => t.id === saved) ? saved : defaultTarget ?? 'production';
+  renderTargets();
   ui.scenarios = scenarios;
   ui.confirmations = confirmations;
   ui.stagedLoad = stagedLoad ?? {};

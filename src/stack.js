@@ -20,11 +20,16 @@ export function targetOf(name = DEFAULT_TARGET) {
   return t;
 }
 
-export class StackNotFoundError extends Error {}
+export class StackNotFoundError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'StackNotFoundError';
+  }
+}
 
-/** CloudFormation's answer for a stack that does not exist, in words. */
+/** A stack that does not exist: ours (readStackOutputs) or CloudFormation's own answer. */
 export function isStackMissing(error) {
-  return /does not exist/i.test(error?.message ?? '') || error?.name === 'StackNotFoundError';
+  return error instanceof StackNotFoundError || error?.name === 'StackNotFoundError' || /does not exist/i.test(error?.message ?? '');
 }
 
 export async function readStackOutputs(stackName = STACK_NAME, { region = process.env.AWS_REGION ?? 'us-east-1', client = null } = {}) {

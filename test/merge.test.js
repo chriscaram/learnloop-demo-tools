@@ -13,7 +13,7 @@ import { stageState } from '../src/generate.js';
 import { simulate } from '../src/model.js';
 import { getScenario, stageOf } from '../src/scenarios.js';
 import { loadedByTarget } from '../src/simulator/actions.js';
-import { StackNotFoundError, readStackOutputs, targetOf } from '../src/stack.js';
+import { StackNotFoundError, isStackMissing, readStackOutputs, targetOf } from '../src/stack.js';
 
 const n = (id, extra = {}) => ({ id, user_id: 'u1', type: 'staff_message', title: 't', body: 'b', link: '/', created_at: '2026-11-01T00:00:00.000Z', read_at: null, ...extra });
 
@@ -138,7 +138,7 @@ test('targets: production and staging by id or stack name; a missing stack says 
   assert.equal(targetOf().stack, 'LearnLoopProd');
   assert.throws(() => targetOf('LearnLoopQa'), /unknown target/);
   const client = { send: async () => { throw Object.assign(new Error('Stack with id LearnLoopStaging does not exist'), { name: 'ValidationError' }); } };
-  await assert.rejects(readStackOutputs('LearnLoopStaging', { region: 'us-east-1', client }), (e) => e instanceof StackNotFoundError && /'LearnLoopStaging' was not found in us-east-1: it is not deployed \(yet\)/.test(e.message));
+  await assert.rejects(readStackOutputs('LearnLoopStaging', { region: 'us-east-1', client }), (e) => e instanceof StackNotFoundError && isStackMissing(e) && /'LearnLoopStaging' was not found in us-east-1: it is not deployed \(yet\)/.test(e.message));
   const ok = { send: async () => ({ Stacks: [{ Outputs: [{ OutputKey: 'StateBucketName', OutputValue: 'b' }] }] }) };
   assert.deepEqual(await readStackOutputs('LearnLoopProd', { client: ok }), { StateBucketName: 'b' });
   // a loaded.json from before targets is Production's record

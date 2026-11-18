@@ -251,8 +251,6 @@ test('the agent\'s own detectors: the history (stage 0) raises nothing, stage 1 
     const [s0, s1, s2, s3] = seen;
     // stage 0, read at onboarding with the history read: nothing at all, on any goal
     assert.deepEqual(s0.map((o) => [o.goal, o.code]), [], `${anchor} stage 0: ${JSON.stringify(s0.map((o) => [o.goal, o.code]))}`);
-    const followUpAt0 = s0.standDowns.filter((d) => d.goal_id === 'g_compliance').map((d) => d.reason);
-    assert.ok(followUpAt0.length <= 1, `${anchor} stage 0: ${followUpAt0}`);
     assert.ok(s0.rows > 0, `${anchor} stage 0: the history read wrote the earlier window`);
     // stage 1: lessons only, and nothing at all about the store or the required training
     assert.deepEqual(goalsWith(s1), ['g_learn'], `${anchor} stage 1: ${JSON.stringify(s1.map((o) => [o.goal, o.code]))}`);
@@ -263,9 +261,9 @@ test('the agent\'s own detectors: the history (stage 0) raises nothing, stage 1 
     const enrol = actor(s2, 'g_cart')[0].facts.inactive_routes;
     assert.deepEqual(enrol.map((r) => r.route), ['/api/courses/{courseId}/enrol'], `${anchor} stage 2: ${JSON.stringify(enrol)}`);
     assert.ok(enrol[0].earlier_actors >= 200 && enrol[0].drop_pct >= 33, `${anchor} stage 2: ${JSON.stringify(enrol)}`);
-    // stages 1 and 2: the follow-up pattern is SEEN (the staff's ordinary reminders) and the
+    // stages 0, 1 and 2: the follow-up pattern is SEEN (the staff's ordinary reminders) and the
     // rule stands down on the growth bar, by name — it is not silent for lack of data
-    for (const [list, n] of [[s1, 1], [s2, 2]]) {
+    for (const [list, n] of [[s0, 0], [s1, 1], [s2, 2]]) {
       assert.ok(!list.some((o) => o.code === FOLLOW_UP), `${anchor} stage ${n}: no manual follow-up finding`);
       const reasons = list.standDowns.filter((d) => d.goal_id === 'g_compliance').map((d) => d.reason);
       assert.equal(reasons.length, 1, `${anchor} stage ${n}: one stand-down on the compliance goal`);

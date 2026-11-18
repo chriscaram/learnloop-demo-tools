@@ -245,3 +245,8 @@ dialog menu { display: flex; justify-content: flex-end; gap: 0.8rem; padding: 0;
 .targets .hint { margin: 0.4rem 0 0; }
 /* stage 0, the history, before the cases */
 .case.case-history .case-num { background: var(--sunken); color: var(--ink-soft); }
+
+.reset-page { max-width: 52rem; margin: 2.5rem auto; padding: 0 1.5rem; }
+.reset-target { border: 0; padding: 0; margin: 1rem 0; display: flex; gap: 1.5rem; }
+.reset-page .seal { grid-template-columns: 1fr; }
+.hint.error { color: var(--bad); }

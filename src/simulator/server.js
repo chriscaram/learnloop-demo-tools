@@ -31,6 +31,7 @@ import { todayUtc } from '../generate.js';
 import { loadScenarios, plainParameters, plainStages, publicCard, scenarioFingerprint, canonicalJson, sealedInput, stageCount, stageOf } from '../scenarios.js';
 import { ACTION_NAMES, APP_LOGS_PREFIX, CONFIRMED_ACTIONS, SEED, STAGED_LOAD_WORDING, STATE_PREFIX, TARGET_CHOICES, createActions, summariseKeys } from './actions.js';
 import { DEFAULT_TARGET, TARGETS } from '../stack.js';
+import { markAgentMessagesUnread } from './reset-reads.js';
 
 export const HOST = '127.0.0.1';
 export const DEFAULT_PORT = 8790;
@@ -40,7 +41,7 @@ export const MAX_BODY_BYTES = 16 * 1024;
 export const MAX_EVENTS_PER_RUN = 5_000;
 export const MAX_RUNS_KEPT = 20;
 const PAGE_DIR = path.join(TOOLS_ROOT, 'simulator');
-const STATIC = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'] };
+const STATIC = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'], '/reset': ['reset.html', 'text/html; charset=utf-8'], '/reset.js': ['reset.js', 'text/javascript; charset=utf-8'] };
 const ANCHOR_RE = /^\d{4}-\d{2}-\d{2}$/;
 export const BUSINESS_DOCS_DIR = path.join(TOOLS_ROOT, 'business-docs');
 /** The download's name never names the scenario: the presenter uploads it to the agent as it is. */
@@ -240,6 +241,16 @@ export function createSimulator({ aws, git, paths, scenariosDir, businessDocsDir
         const { action } = await readBody(req);
         if (!CONFIRMED_ACTIONS[action]) return sendJson(res, 400, { error: `'${action}' does not need a confirmation` });
         return sendJson(res, 200, { action, token: issueToken(action), expiresInSeconds: TOKEN_TTL_MS / 1000, warning: CONFIRMED_ACTIONS[action] });
+      }
+      // The presenter's reset (/reset page): AI agent messages back to unread. Not an action
+      // of the main page; refused while an action runs; a real write needs confirm: 'unread'.
+      if (req.method === 'POST' && p === '/api/reset-reads') {
+        const body = await readBody(req);
+        if (current) return sendJson(res, 409, { error: `'${current.name}' is still running; wait for it to finish` });
+        const target = targetParam(body.target);
+        const dryRun = body.dryRun === true;
+        if (!dryRun && body.confirm !== 'unread') return sendJson(res, 400, { error: "confirm: 'unread' is required" });
+        return sendJson(res, 200, await markAgentMessagesUnread({ aws, stack: TARGETS[target].stack, dryRun }));
       }
       const act = p.match(/^\/api\/actions\/([a-z]+)$/);
       if (req.method === 'POST' && act) {

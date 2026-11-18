@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Presenter reset</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="reset-page">
+    <h1>Presenter reset</h1>
+    <p class="purpose">For the presenter, before the audience arrives. Not linked from the simulator's page.</p>
+
+    <section class="seal">
+      <div class="seal-text">
+        <h2>Mark AI agent messages unread</h2>
+        <p>Opening a learner's bell during a rehearsal marks the AI agents' messages as read, so the bell loses its count and the staff screens show them as opened. This puts every message an AI agent wrote back to unread. Nothing else changes: other notifications, the AI agents' messages themselves and every other record stay as they are.</p>
+        <fieldset class="reset-target">
+          <legend>Where</legend>
+          <label><input type="radio" name="target" value="staging" checked> Staging (LearnLoopStaging)</label>
+          <label><input type="radio" name="target" value="production"> Production (LearnLoopProd)</label>
+        </fieldset>
+        <div class="actions">
+          <button type="button" id="check">Check first</button>
+          <button type="button" class="primary" id="reset">Mark unread</button>
+        </div>
+        <p class="hint" id="result" aria-live="polite"></p>
+      </div>
+    </section>
+    <p><a href="/">Back to the simulator</a></p>
+  </main>
+  <script src="/reset.js"></script>
+</body>
+</html>

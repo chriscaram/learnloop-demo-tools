@@ -4,17 +4,22 @@ What each stage of the staged scenario `q4-three-signals` puts into LearnLoop's 
 
 ## 0. Conventions
 
-- **Days** are counted from the start date (the anchor, day 0). The history covers days −60 … −1. The Governance Agent reads two 30-day windows: **earlier = days −59 … −30** (read once, when the application is onboarded) and **recent = days −29 … 0** (read again at every "Get usage telemetry"; day 0 holds no history).
+- **Days** are counted from the start date (the anchor, day 0). The history covers days −60 … −1. The Governance Agent reads two 30-day windows: **earlier = days −59 … −30** (read once, right after the first read, which is the onboarding one, over stage 0) and **recent = days −29 … 0** (read at onboarding and again at every "Get usage telemetry"; day 0 holds no history).
 - **Numbers** are seed 42. "15 Nov" is the anchor 2026-11-15; a range `a … b` covers start dates on all seven weekdays (2026-11-15 … 2026-11-21). They are what `src/generate.js` `computeStats()` reports (`capabilities`, `carts`, `compliance`), and what the tests assert with margin.
 - **People on a route** = distinct client IPs per route template (the CloudFront actor key the agent uses), per window. A route with no request in a window has no baseline there (it is unmeasured, not a 100% drop).
 - **Capabilities.** One LearnLoop service directory = one code component = one capability for the agent's `declared_in_code` route rule. The names in the console's screenshots: `services/learning` = "Course delivery and learner progress", `services/catalog` = "Course catalog and discovery", `services/admin` = "Platform administration", `services/notifications` = "Learner notification delivery". A re-derivation may name them differently; go by the routes they hold.
-- **Stages.** Stage 3 is the whole scenario, byte for byte. Stages 1 and 2 leave out recent traffic of what a later stage reveals (by route, or by a named activity) and the matching state; the earlier window is final from stage 1 (definition: `scenarios/q4-three-signals.json` `staged_reveal`; mechanics: `src/generate.js` `stageWithhold`/`stageState`, `src/emit.js`).
+- **Stages.** Stage 0, the history, is loaded before the application is onboarded; stages 1 to 3 each add a case. Stage 3 is the whole scenario, byte for byte. Stages 0 to 2 leave out recent traffic of what a later stage reveals (by route, or by a named activity) and the matching state; the earlier window is final from stage 0 (definition: `scenarios/q4-three-signals.json` `staged_reveal.history_stage` and `staged_reveal.stages`; mechanics: `src/generate.js` `stageWithhold`/`stageState`, `src/emit.js`).
 
-| Stage | Adds | Left out of the logs from day −29 on | Left out of the starting state |
-|---|---|---|---|
-| 1 | case 1, lessons | `POST /api/courses/{courseId}/enrol`, `POST /api/me/cart/items`, `DELETE /api/me/cart/items/{courseId}`; the activity `training_follow_up_surge` | `carts.json` empty; the surge's reminders not in `notifications.json` |
-| 2 | case 2, the checkout | the activity `training_follow_up_surge` | the surge's reminders not in `notifications.json` |
-| 3 | case 3, required training | nothing | nothing |
+| Stage | Adds | Left out of the logs from day −29 on | Left out of the starting state | App state on load |
+|---|---|---|---|---|
+| 0 | the history, before onboarding | `GET /api/lessons/{lessonId}`, `GET /api/courses/{courseId}/lessons`, `POST /api/lessons/{lessonId}/progress`, `POST /api/lessons/{lessonId}/quiz`; the three routes of stage 1; the activity `training_follow_up_surge` | the surge's reminders not in `notifications.json` (carts are there) | replaced |
+| 1 | case 1, lessons | `POST /api/courses/{courseId}/enrol`, `POST /api/me/cart/items`, `DELETE /api/me/cart/items/{courseId}`; the activity `training_follow_up_surge` | the surge's reminders not in `notifications.json` | merged into the live state |
+| 2 | case 2, the checkout | the activity `training_follow_up_surge` | the surge's reminders not in `notifications.json` | merged |
+| 3 | case 3, required training | nothing | nothing | merged (adds the surge's reminders) |
+
+**Why stage 0 is not empty after day −30.** The goal-trend rule (NBF-DRIFT-GOAL_TREND_NEGATIVE) splits a goal's daily series, over the days observed, in half (`drift/decompose.js` `trendOf`). With no recent day observed at all, that series holds only days −59 … −30, inside which the lapse (days −45 … −31) and the checkout change (from days −40 … −30) already begin: the lesson goal falls 14 … 31% and the purchases goal 33 … 58% there (−10% is the bar), so both would be raised at onboarding. Stage 0 therefore keeps, of the recent days, the ordinary activity no case is about (sign-ins, the dashboard, `GET /api/me/progress`, the catalog and `GET /api/me/cart`, notifications, Help, the staff's work at its earlier level). Those are the busiest routes of each capability, so the recent days carry each goal's series at its usual level. `test/governance-agent.test.js` shows both: stage 0 as built raises nothing on any start weekday, and the same stage with no recent traffic at all (`recent_traffic_withheld: "all"`, which the generator supports) raises the two trends.
+
+**The app state between stages.** Stage 0 replaces `state/<domain>.json`; stages 1 to 3 add to the live documents (README, "The state documents: replaced, or added to"): every live record kept, only the stage's new records added, nothing the app or an AI agent wrote overwritten. For this scenario only stage 3 writes a state document (`notifications.json`: the surge's reminders).
 
 ## 1. What every stage has (the baseline)
 
@@ -34,7 +39,7 @@ What each stage of the staged scenario `q4-three-signals` puts into LearnLoop's 
 | events | `lesson_started`, `lesson_completed` (entity `lesson`, value = minutes), `quiz_submitted` (value = score), `progress_viewed` | `services/learning/src/services/progress.js`, `quiz.js`; names in `packages/shared/src/logger.js` `EVENT_NAMES` |
 | state | `progress.json`: `lessons[]` (`user_id`, `course_id`, `lesson_id`, `status`, `started_at`, `completed_at`), `courses[]` (`last_activity_at`) | `services/learning/src/repositories/progress.js` |
 
-**Numbers** (earlier → recent; the same in all three stages, byte for byte):
+**Numbers** (earlier → recent; the same in stages 1 to 3, byte for byte; in stage 0 these four lesson routes have their earlier window and no recent one, `GET /api/me/progress` is as below):
 
 | Route | 15 Nov | All seven start weekdays |
 |---|---|---|
@@ -60,14 +65,14 @@ What each stage of the staged scenario `q4-three-signals` puts into LearnLoop's 
 
 **Numbers** (earlier → recent):
 
-| Route | Stage 1 | Stages 2 and 3, 15 Nov | Stages 2 and 3, all seven start weekdays |
+| Route | Stages 0 and 1 | Stages 2 and 3, 15 Nov | Stages 2 and 3, all seven start weekdays |
 |---|---|---|---|
 | `POST /api/courses/{courseId}/enrol` | 301 … 316 → no recent window | 311 → 157 (−49.5%) | 301 … 316 → 148 … 158 (−48.0 … −52.8%) |
 | `POST /api/me/cart/items` | → no recent window | 326 → 287 (−12.0%) | −7.7 … −13.5% |
 | `GET /api/me/cart` (capability max) | −3.6 … −4.4% | 410 → 393 (−4.1%) | −3.6 … −4.4% |
-| learners with a waiting cart (`carts.json`) | 0 (withheld) | 143 | 139 … 155 |
+| learners with a waiting cart (`carts.json`, from stage 0) | 143 (15 Nov) | 143 | 139 … 155 |
 
-**Detector that fires** (from stage 2). **NBF-USAGE-ACTOR_INACTIVITY** on the catalog capability, the enrol route named by the route-level fallback (same rule and constants as case 1); also NBF-DRIFT-GOAL_TREND_NEGATIVE on the purchases goal (−69.4 … −78.1%). In stage 1 the enrol and cart-write routes have one measured window (`too_few_measured_windows`), so nothing is raised. Agentic-eligible: a cart reminder from `carts.json`.
+**Detector that fires** (from stage 2). **NBF-USAGE-ACTOR_INACTIVITY** on the catalog capability, the enrol route named by the route-level fallback (same rule and constants as case 1); also NBF-DRIFT-GOAL_TREND_NEGATIVE on the purchases goal (−69.4 … −78.1%). In stages 0 and 1 the enrol and cart-write routes have one measured window (`too_few_measured_windows`), so nothing is raised. The carts themselves are in the starting state from stage 0 (Marco's two courses can be shown before stage 2): the agent reads no cart document, only the cart and enrol traffic, which waits for stage 2. Agentic-eligible: a cart reminder from `carts.json`.
 
 ## 4. Stage 3 — case 3: required training falls behind
 
@@ -81,7 +86,7 @@ What each stage of the staged scenario `q4-three-signals` puts into LearnLoop's 
 
 ### 4.1 Where it is in LearnLoop
 
-**State (in every stage).**
+**State (in every stage, from stage 0).**
 
 | File | Fields | LearnLoop code |
 |---|---|---|
@@ -136,23 +141,23 @@ Free text is never logged (`packages/shared/src/logger.js`): a reminder's title 
 
 Reminders peak in the ten days before each deadline and the three weeks after it (the busiest days of the 60 are always within that span of a due date). Sofia sends the largest share (50 … 60%). In stages 1 and 2 the recent window holds the follow-up at its earlier level, day for day (each recent day keeps as many chases as the same weekday four weeks earlier); stage 3 adds the rest.
 
-### 4.3 Which capability, and why no current detector fires
+### 4.3 Which capability, and which detector
 
-The staff side (`/api/admin/learners…`) is in the admin capability ("Platform administration"); the employees' learning is in the learning capability, where it is part of case 1's numbers; the reminders land in the notifications capability. `test/governance-agent.test.js` runs the agent's own `observationsForGoal` with a goal "95% of mandatory training completed on time across enterprise accounts" linked to the admin capability: **nothing is raised in any stage on any start weekday**, and stage 3 gives exactly stage 2's observations, fingerprints included. Why:
+The staff side (`/api/admin/learners…`) is in the admin capability ("Platform administration"); the employees' learning is in the learning capability, where it is part of case 1's numbers; the reminders land in the notifications capability. `test/governance-agent.test.js` runs the agent's own `observationsForGoal` with a goal "95% of mandatory training completed on time across enterprise accounts" linked to the admin capability, over the reads of the staged reveal (onboarding over stage 0 with the history read, then one read per stage), on all seven start weekdays:
 
-- **Every current rule reads route baselines only** (`platform/telemetry/ingestion.js`: per route requests, distinct client IPs, daily counts, error rates, latency). None reads a state document (`training_assignments.json`, `users.json` organisational fields, `quiz_results.json`), an event payload, or a notification's text.
-- **ACTOR_INACTIVITY** needs ≥ 200 people in the earlier window; the staff routes have one (the office address). It also looks for falls; the staff's activity rises.
-- **GOAL_TREND_NEGATIVE** needs a falling daily series; the follow-up rises in stage 3 and is held at its earlier level in stages 1 and 2. (A capability's daily series is the latest route row per day, the least busy route first. The follow-up runs inside the staff's ordinary Admin visits, whose learner-list load is present on almost every weekday and is less busy than the look-ups and reminders, so withholding the surge does not change the admin series. Withholding whole routes, or opening the learner list once per employee, made a false −13 … −38% trend on that goal in stages 1 and 2 on several start weekdays; that is why the case is withheld as an activity and the list is loaded once per visit, the way LearnLoop's Admin page works: it filters the list in the browser.)
-- **USAGE/HIDDEN/UNDERUSED/JOURNEY/DEMAND_SHIFT** compare capability volumes and serving weights; nothing here moves those.
-- **The employees' learning** is not withheld in any stage: it is case 1's traffic, and withholding it would change case 1's numbers. Linking the compliance goal to the learning capability would only repeat case 1's lesson finding under the compliance goal.
+- **Stage 3: NBF-USAGE-MANUAL_FOLLOW_UP**, exactly one, on the training goal (`packages/platform/business-data/follow-up-patterns.js` aggregates the application logs per 30-day window; `drift/follow-up.js` and `drift/detectors.js` decide). Lookup route `GET /api/admin/learners/{userId}/training`, contact event `staff_message_sent`, 3 operators, growth at least 2.5× the earlier window, at least 90% of reminders paired with a look-up, response not improving. LearnLoop's records (`packages/platform/business-data/application-records.js` over `training_assignments.json`, `users.json`, `progress.json`, `quiz_results.json`, `notifications.json`, read from the live state) add the outcome: on-time completion per past deadline flat (within 10 points), 50 … 75% overall, the overdue courses in the three behind teams (at least 60% of them), 60 or more at risk; only the message wording is not measured.
+- **Stages 0, 1 and 2:** the rule sees the follow-up (the ordinary reminders, at their earlier level) and stands down by name (`follow_up_not_growing` or `follow_up_too_few_messages`, growth under 1.6×): it is never silent for lack of data.
+- **ACTOR_INACTIVITY** needs ≥ 200 people in the earlier window; the staff routes have one (the office address). **GOAL_TREND_NEGATIVE** needs a falling daily series; the follow-up rises in stage 3 and is held at its earlier level before. (A capability's daily series is the latest route row per day, the least busy route first. The follow-up runs inside the staff's ordinary Admin visits, whose learner-list load is present on almost every weekday and is less busy than the look-ups and reminders, so withholding the surge does not change the admin series. Withholding whole routes, or opening the learner list once per employee, made a false −13 … −38% trend on that goal in stages 1 and 2 on several start weekdays; that is why the case is withheld as an activity and the list is loaded once per visit, the way LearnLoop's Admin page works: it filters the list in the browser.)
+- **The employees' learning** is case 1's traffic, withheld in stage 0 with the other lesson routes and revealed in stage 1. Linking the compliance goal to the learning capability would only repeat case 1's lesson finding under the compliance goal.
+- Without the compliance pass (`parameters.compliance: null`) the lesson and enrol findings are the same, fingerprints included, in every stage, and the follow-up rule never fires.
 
-**What a compliance detector would have to read** (none of this exists in the agent today):
+What the finding (and the AI agent it can lead to) reads, joined:
 
-1. **State, joined by user:** `training_assignments.json` × `users.json` (`organization_id`, `department`, `manager_id`) × `progress.json` × `quiz_results.json`, with LearnLoop's `trainingState` rule. Per account, team and manager: courses due by now, overdue, completed on time, at risk (due within N days, not completed), and the on-time share per deadline over time. The case shows as: overdue share in the behind teams 48 … 93% against 0 … 22% elsewhere (the three behind teams, one per account, hold at least 60% of all overdue courses), 120 … 136 courses at risk, and an on-time share of 53 … 74% per deadline that does not improve, against a 95% goal. The assignments can be read in any stage; they are what the reminders are about.
-2. **Application logs, per staff actor** (`user.id` is the pseudonymised staff id in `app-logs/service=admin/…`; CloudFront cannot separate the three staff, they share one address): per week, the count of `GET /api/admin/learners/{userId}/training` request lines and `staff_message_sent` events, the distinct employees looked up (the `{userId}` is in the CloudFront `cs-uri-stem`, not in the app-log route template), and the ratio of the recent window to the earlier one (≈ 1 in stages 1 and 2, 2.4 … 3.2 in stage 3). A look-up followed within minutes by a message to the same user, repeated tens of times a day by one person, is the manual process.
+1. **State, joined by user:** `training_assignments.json` × `users.json` (`organization_id`, `department`, `manager_id`) × `progress.json` × `quiz_results.json`, with LearnLoop's `trainingState` rule. Per account, team and manager: courses due by now, overdue, completed on time, at risk (due within N days, not completed), and the on-time share per deadline over time. The case shows as: overdue share in the behind teams 48 … 93% against 0 … 22% elsewhere, 120 … 136 courses at risk, and an on-time share of 53 … 74% per deadline that does not improve, against a 95% goal. The assignments are in every stage; they are what the reminders are about.
+2. **Application logs, per staff actor** (`user.id` is the pseudonymised staff id in `app-logs/service=admin/…`; CloudFront cannot separate the three staff, they share one address): per week, the count of `GET /api/admin/learners/{userId}/training` request lines and `staff_message_sent` events, and the ratio of the recent window to the earlier one (≈ 1 in stages 0 to 2, 2.4 … 3.2 in stage 3). A look-up followed within minutes by a message to the same user, repeated tens of times a day by one person, is the manual process.
 3. **Template repetition:** join `staff_message_sent` `entity.id` to `notifications.json` (`title`, `body`): 6 titles for 293 … 388 recent reminders, the bodies differing only in the name, the course, the date and the percentage.
 4. **Timing against deadlines:** reminder counts per day relative to each assignment's `due_at` (peaks from −10 to +21 days).
-5. **Trend despite effort:** reminders up about three times while the on-time share per deadline stays flat and only 22 … 28% of recent reminders are followed by any lesson activity on that course within 7 days (lesson events in the logs, or `progress.json`). Effort up, outcome flat, is the opportunity: a staff compliance view and an AI agent that follows up, reschedules, escalates to the manager and adapts the required training.
+5. **Trend despite effort:** reminders up about three times while the on-time share per deadline stays flat and only 22 … 28% of recent reminders are followed by any lesson activity on that course within 7 days. Effort up, outcome flat, is the opportunity: a staff compliance view and an AI agent that follows up, reschedules, escalates to the manager and adapts the required training.
 
 Protected or demographic attributes are not generated, not inferred, and not needed by any of the above.
 
@@ -174,7 +179,7 @@ What a future screen listing the messages an AI agent sent (and whether they wor
 | Login | Stage | What they show |
 |---|---|---|
 | `ana.moreno@example.com` | 1 | lapsed: 35% of Cloud Foundations, last lesson day −33, signs in afterwards; not an employee |
-| `marco.bellini@example.com` | 2 | two courses waiting in his cart, checkout left on day −9; not an employee |
+| `marco.bellini@example.com` | 2 (his cart is there from stage 0) | two courses waiting in his cart, checkout left on day −9; not an employee |
 | `lena.hoffmann@example.com` | 3 | an employee in a behind team, still signing in and learning, overdue on a required course she has started (often with a failed quiz attempt), with several reminders (some unopened). Chosen after the simulation, so her account, team and course depend on the start date (15 Nov: Corvel Bank, Retail branches, SQL for Analysts at 90%, due 3 Nov, 5 reminders) |
 | `tobias.brandt@example.com` | 3 | Lena's manager (her `manager_id`); his team holds several overdue courses |
 | `sofia.lindqvist@example.com` | all | staff; sends most reminders; Admin → Learners → Training shows any employee's required courses |

@@ -8,7 +8,7 @@
 
 LearnLoop is an online course platform that people pay for monthly. One plan, 19 USD per month, gives access to the whole catalog: 12 self-paced courses in four areas (Data, Cloud, Leadership, Design), each made of six to ten short video lessons with quizzes.
 
-Learners pick their next course in the store: they put it in their shopping cart and complete the checkout, which enrols them (the course is included in their plan). The cart is saved to their account, so it follows them from one device to another.
+Learners pick their next course in the course catalog: they put it in their shopping cart and complete the checkout, which enrols them in the course (the course is included in their plan). The cart is saved to their account, so it follows them from one device to another.
 
 Learners who need help use the Help page: they ask the team a question there and come back to it to read the answer.
 
@@ -78,7 +78,7 @@ Price, plan, catalog, the checkout page and the Admin area stayed the same durin
 In order of importance:
 
 1. **More learners actively progressing every week.** Get back to at least 300 learners starting or completing lessons each week, which is where we were in September (it is about 184 now).
-2. **Complete the purchases learners start.** At least 300 learners completing a checkout every 30 days by the end of the quarter (it is 158 now), and no course left waiting in a cart for more than 7 days.
+2. **Complete the purchases learners start in the course catalog.** At least 300 learners enrolling every 30 days in a course they chose from the catalog and put in their cart (it is 158 now), and no course left waiting in a cart for more than 7 days.
 3. **95% of mandatory training completed on time across our enterprise accounts.** For every deadline this quarter, at least 95% of the employees it applies to complete the required course on time (it is 63% so far), with completion visible to each customer by team and manager.
 
 **Guardrail:** support workload must not grow. The three-person team should not handle more tickets, messages or manual tasks per week than it does today. We will judge any change against this as well as against the three goals above.

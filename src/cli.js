@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// npm run seed -- [--scenario lapsed-learners] [--stage n] [--anchor YYYY-MM-DD] --salt <value> [--seed 42] [--data-dir <path>]
+// npm run seed -- [--scenario lapsed-learners] [--stage n (0 = the history)] [--anchor YYYY-MM-DD] --salt <value> [--seed 42] [--data-dir <path>]
 //                 [--distribution-id E...] [--distribution-domain dxxxx.cloudfront.net]
 // Writes the mock state to <LearnLoop>/data/seed/ and 60 days of logs to ./out/.
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -42,7 +42,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     },
   });
   if (!values.salt) {
-    console.error('seed: --salt is required (the value of the learnloop/prod/log-pseudonym-salt secret)');
+    console.error('seed: --salt is required (the value of the target stack\'s LogPseudonymSaltSecretName secret: learnloop/prod/log-pseudonym-salt for LearnLoopProd, the learnloop/staging/ one for LearnLoopStaging)');
     process.exit(2);
   }
   const stage = values.stage === undefined ? null : Number(values.stage);
@@ -63,7 +63,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   };
   const dataDir = path.resolve(values['data-dir']);
   const { stats, appLogs, cloudfront } = await runSeed(options, { dataDir });
-  console.log(`seed: scenario ${options.scenario}${stage ? ` (stage ${stage})` : ''}, anchor ${options.anchor}, seed ${options.seed}`);
+  console.log(`seed: scenario ${options.scenario}${stage !== null ? ` (stage ${stage})` : ''}, anchor ${options.anchor}, seed ${options.seed}`);
   console.log(`seed: wrote ${dataDir}/*.json, ${appLogs.size} app log files and ${cloudfront.size} CloudFront log files to ${OUT_DIR}`);
   console.log(`seed: learners on lesson routes ${stats.window1.learnersOnLessons} (days -60..-31) and ${stats.window2.learnersOnLessons} (days -30..-1)`);
 }

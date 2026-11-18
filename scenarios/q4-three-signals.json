@@ -22,7 +22,7 @@
       "ai_agent": "A compliance follow-up: a staff view of completion by account, team and manager with who is at risk, and an AI agent that follows up, reschedules, escalates to the manager and adapts the required training."
     }
   ],
-  "expected_finding": "Two separate findings, each about fewer returning users on part of a different capability, each saying the application was healthy over the period. About 40% fewer learners open lessons in 'Course delivery and learner progress' (an AI agent could bring inactive learners back with a lesson reminder). About half as many learners complete the enrolment step of the checkout in the catalog and purchase capability, while nearly as many as before put courses in their cart (an AI agent could remind the roughly 145 learners whose courses wait in their cart). The third case, required training falling behind, raises no finding with the Governance Agent's current detectors: its evidence is in the training assignments, the staff's look-ups and the reminder messages, which no detector reads yet (docs/signal-spec.md).",
+  "expected_finding": "Two separate findings, each about fewer returning users on part of a different capability, each saying the application was healthy over the period. About 40% fewer learners open lessons in 'Course delivery and learner progress' (an AI agent could bring inactive learners back with a lesson reminder). About half as many learners complete the enrolment step of the checkout in the catalog and purchase capability, while nearly as many as before put courses in their cart (an AI agent could remind the roughly 145 learners whose courses wait in their cart). The third case, required training falling behind, is a manual follow-up finding on the training goal: the three staff look employees up and send about three times as many near-identical reminders as before, while on-time completion does not improve and the overdue courses sit in three teams (docs/signal-spec.md).",
   "status": "verified",
   "verified_against": [
     {
@@ -34,8 +34,8 @@
       "threshold": "Catalog (services/catalog: cart and enrolment): distinct client IPs on POST /api/courses/{courseId}/enrol fall from 301..316 to 148..158 (-48.0..-52.8% on all seven start weekdays). The only other catalog route that moves is POST /api/me/cart/items (about 320 -> 288, -7.7..-13.5%), under the 33% bar, so the enrol route is the one named; GET /api/me/cart, GET /api/courses and GET /api/courses/{courseId} move under 5% (capability-level max -3.6..-4.4%). Learners who stopped opening lessons keep saving courses in the cart, which is why cart adds stay flat while lessons fall. data/seed/carts.json holds 139..155 learners with courses waiting in their cart."
     },
     {
-      "file": "packages/modules/new-evolution-opportunity/drift/detectors.js (observationsForGoal: every rule reads route baselines; none reads state documents or event payloads); packages/platform/telemetry/ingestion.js (route aggregates: requests, distinct client IPs, daily counts)",
-      "threshold": "Compliance training: no current detector fires, checked with a goal '95% of mandatory training completed on time' linked to the capability that holds the staff's look-ups and reminders (services/admin), in every stage and on all seven start weekdays. The staff are three people at one office address (distinct users 1, far under MIN_INACTIVITY_ACTORS = 200), their traffic rises rather than falls (no GOAL_TREND_NEGATIVE), and the evidence is in data/seed/training_assignments.json (overdue courses concentrated in the teams marked behind: 48..93% overdue there, 0..22% in the other teams), in the reminder notifications (one template, a few titles) and in the volume of GET /api/admin/learners/{userId}/training and POST /api/admin/learners/{userId}/message from the staff (103..146 reminders in days -59..-30, 293..388 in days -29..0), none of which a detector reads. Help and support are an ordinary feature (about 3 questions a week, answered within a day) and raise nothing."
+      "file": "packages/platform/business-data/follow-up-patterns.js (the application-log follow-up aggregator), packages/modules/new-evolution-opportunity/drift/follow-up.js and detectors.js (NBF-USAGE-MANUAL_FOLLOW_UP), packages/platform/business-data/application-records.js (the state documents read)",
+      "threshold": "Compliance training: NBF-USAGE-MANUAL_FOLLOW_UP on a goal '95% of mandatory training completed on time' linked to the capability that holds the staff's look-ups and reminders (services/admin), from stage 3 only, on all seven start weekdays (test/governance-agent.test.js). Three staff at one office address pair a GET /api/admin/learners/{userId}/training look-up with a staff_message_sent reminder (103..146 reminders in days -59..-30, 293..388 in days -29..0, growth at least 2.5x), on-time completion per deadline stays flat (training_assignments.json read with LearnLoop's rule) and the overdue courses sit in the three behind teams. In the history stage and stages 1 and 2 the rule stands down by name (no current window, or the follow-up not growing). Help and support are an ordinary feature (about 3 questions a week, answered within a day) and raise nothing."
     },
     {
       "file": "packages/modules/new-evolution-opportunity/drift/explanations.js (evaluateIncident, evaluateDataQuality; SUPPRESSING_CAUSES in constants.js)",
@@ -47,7 +47,7 @@
     },
     {
       "file": "backend/src/cadence.js (continueAfterTelemetryIngest: the earlier window is read once per application), packages/platform/telemetry/ingestion.js (route baselines exist only for routes with requests in the window read), packages/modules/new-evolution-opportunity/drift/usage.js (actorWindowsOf: the highest distinct-user count per window is kept), detectors.js (actorDropVerdict: a route needs two measured windows)",
-      "threshold": "The staged reveal (staged_reveal below). One 'Get usage telemetry' reads days -29..0 again; days -59..-30 are read only when the application is onboarded (GA_TELEMETRY_HISTORY_WINDOWS = 1, and a later read finds that history already read). So every stage carries the final traffic of days -60..-30, and withholds only recent traffic: the cart write and enrol routes until stage 2, and, until stage 3, the part of the staff's training follow-up above its earlier level (a named activity, not a route: the routes keep the follow-up at its earlier level, day for day, so no stage shows a fall in the staff's activity). A withheld route has one measured window (too_few_measured_windows, no finding) until its stage brings its recent window; the routes already revealed are byte for byte the same in every stage, so the agent's max-per-window merge keeps their numbers and the stage-1 finding keeps its fingerprint (one live finding per code and capability: duplicate_live). Checked with the agent's own observationsForGoal over baselines built from each stage, start dates on all seven weekdays: stage 1 raises only the lesson finding, stage 2 adds the enrol finding (earlier 301..316 -> recent 148..158), stage 3 adds nothing a current detector sees."
+      "threshold": "The staged reveal (staged_reveal below). One 'Get usage telemetry' reads days -29..0 again; days -59..-30 are read only once, right after the first read, which happens when the application is onboarded (GA_TELEMETRY_HISTORY_WINDOWS = 1, and a later read finds that history already read). So the history stage, loaded before onboarding, carries the final traffic of days -60..-30 and no recent traffic at all, every later stage carries the same days -60..-30, and withholds only recent traffic: the cart write and enrol routes until stage 2, and, until stage 3, the part of the staff's training follow-up above its earlier level (a named activity, not a route: the routes keep the follow-up at its earlier level, day for day, so no stage shows a fall in the staff's activity). A withheld route has one measured window (too_few_measured_windows, no finding) until its stage brings its recent window; the routes already revealed are byte for byte the same in every stage, so the agent's max-per-window merge keeps their numbers and the stage-1 finding keeps its fingerprint (one live finding per code and capability: duplicate_live). Checked with the agent's own observationsForGoal over baselines built from each stage, start dates on all seven weekdays: the history stage raises nothing, stage 1 raises only the lesson finding, stage 2 adds the enrol finding (earlier 301..316 -> recent 148..158), stage 3 adds the manual follow-up finding, with the earlier window read only at the history stage."
     }
   ],
   "parameters": {
@@ -245,7 +245,26 @@
   },
   "staged_reveal": {
     "recent_window_from_day": -29,
-    "why": "The presenter onboards LearnLoop once and reveals the three cases one at a time. The Governance Agent reads the earlier 30 days only when the application is onboarded and keeps the highest distinct-user count it has read for a window, so a stage may only add recent traffic, and the earlier 30 days must be final from the first stage on.",
+    "why": "The presenter onboards LearnLoop once and reveals the three cases one at a time. The Governance Agent reads the earlier 30 days only once, right after its first read, which happens when the application is onboarded, and keeps the highest distinct-user count it has read for a window, so a stage may only add recent traffic, and the earlier 30 days must be final from the history stage on. The history stage is loaded before onboarding: it holds the final earlier 30 days, and of the recent days only the ordinary activity no case is about. With no recent traffic at all the goals' daily series would hold only the earlier 30 days, inside which the lapse and the checkout change already begin, and the agent's goal-trend rule would raise the lesson and purchase goals at onboarding.",
+    "history_stage": {
+      "loads": "The final days -60..-30 (identical in every later stage) and the app's starting state, carts included. From day -29 on, only the ordinary activity no case is about: signing in, the dashboard, progress, the catalog, the cart page, notifications, Help and the staff's work at its earlier level; the lesson routes, the checkout's write routes and the follow-up surge have no recent traffic at all (unmeasured, not observed zeros). Loaded before the application is onboarded in the Governance Agent, the same day.",
+      "expected_new_finding": "No finding. The lesson and checkout routes have their earlier window and no recent one (too_few_measured_windows); every other route reads the same in both windows; the goals' daily series do not fall, because the busiest routes of each capability carry the recent days; the follow-up is at its earlier level.",
+      "recent_traffic_withheld": [
+        "GET /api/lessons/{lessonId}",
+        "GET /api/courses/{courseId}/lessons",
+        "POST /api/lessons/{lessonId}/progress",
+        "POST /api/lessons/{lessonId}/quiz",
+        "POST /api/courses/{courseId}/enrol",
+        "POST /api/me/cart/items",
+        "DELETE /api/me/cart/items/{courseId}"
+      ],
+      "recent_activity_withheld": [
+        "training_follow_up_surge"
+      ],
+      "state_withheld": [
+        "training_follow_up_surge_notifications"
+      ]
+    },
     "stages": [
       {
         "adds_case": 1,
@@ -259,7 +278,6 @@
           "training_follow_up_surge"
         ],
         "state_withheld": [
-          "carts",
           "training_follow_up_surge_notifications"
         ]
       },
@@ -276,7 +294,7 @@
       },
       {
         "adds_case": 3,
-        "expected_new_finding": "No new finding from the current detectors, the first two still there: the staff's reminders and training look-ups about triple in the last 30 days (103..146 -> 293..388 reminders), while overdue required training stays concentrated in a few teams (data/seed/training_assignments.json). This is the evidence a compliance detector would read (docs/signal-spec.md).",
+        "expected_new_finding": "A third finding, the first two still there: the staff follow up by hand (NBF-USAGE-MANUAL_FOLLOW_UP on the training goal, the capability that holds GET /api/admin/learners/{userId}/training and the staff's reminders): three people send about three times as many reminders in the last 30 days (103..146 -> 293..388), each after a training look-up, while on-time completion per deadline stays flat and the overdue courses sit in three teams (data/seed/training_assignments.json).",
         "recent_traffic_withheld": [],
         "recent_activity_withheld": [],
         "state_withheld": []

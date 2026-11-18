@@ -38,7 +38,12 @@ export function stageView(sim, st) {
   const withhold = stageWithhold(sim, st);
   const data = stageState(sim.data, st, sim);
   if (!withhold && data === sim.data) return sim;
-  return { ...sim, data, requests: withhold ? sim.requests.filter((r) => !isWithheld(r, withhold)) : sim.requests };
+  return {
+    ...sim, data,
+    requests: withhold ? sim.requests.filter((r) => !isWithheld(r, withhold)) : sim.requests,
+    // the history stage holds no line at all from the recent window on, system events included
+    systemEvents: withhold?.all ? sim.systemEvents.filter((e) => e.ts < withhold.fromMs) : sim.systemEvents,
+  };
 }
 
 /** computeStats over a stage view, labelled with the stage. */
@@ -46,14 +51,21 @@ export function stageStats(view, logs, st) {
   return { ...computeStats(view, logs), stage: st ? { stage: st.stage, of: st.count, addsCase: st.addsCase } : null };
 }
 
-/** What a stage leaves out of the logs: null when nothing (no stage, or the last one). */
+/**
+ * What a stage leaves out of the logs: null when nothing (no stage, or the last one).
+ * `all` (the history stage): every line from `fromMs` on, on every route.
+ */
 export function stageWithhold(sim, st) {
-  if (!st || (st.withheldRoutes.size === 0 && st.withheldActivities.size === 0)) return null;
-  return { routes: st.withheldRoutes, activities: st.withheldActivities, fromMs: sim.anchorMs + st.fromDay * DAY_MS };
+  if (!st) return null;
+  const fromMs = sim.anchorMs + st.fromDay * DAY_MS;
+  if (st.allRecentWithheld) return { all: true, routes: new Set(), activities: new Set(), fromMs };
+  if (st.withheldRoutes.size === 0 && st.withheldActivities.size === 0) return null;
+  return { routes: st.withheldRoutes, activities: st.withheldActivities, fromMs };
 }
-/** Whether a request belongs to what a stage leaves out: a withheld route, or a withheld named activity (any kind of line). */
+/** Whether a request belongs to what a stage leaves out: every request (the history stage), a withheld route, or a withheld named activity (any kind of line). */
 export const isHeld = (r, withhold) => !!withhold
-  && ((r.kind === 'api' && withhold.routes.has(`${r.method} ${r.route}`)) || (r.activity !== undefined && withhold.activities.has(r.activity)));
+  && (withhold.all === true
+    || (r.kind === 'api' && withhold.routes.has(`${r.method} ${r.route}`)) || (r.activity !== undefined && withhold.activities.has(r.activity)));
 /** Whether one simulated request is left out (by its start time; the logs decide per line). */
 export const isWithheld = (r, withhold) => isHeld(r, withhold) && r.ts >= withhold.fromMs;
 

@@ -66,6 +66,9 @@ const hourKey = (ms) => {
  * draw is still made, in the same order, and every hour keeps its CloudFront object
  * (header only, if nothing in it is left), so all other lines, and every object key,
  * are byte for byte what the same generation writes without `withhold`.
+ * `withhold.all` (the history stage of a staged reveal): every line from `fromMs` on is left
+ * out, system events included, and the hours from `fromMs` on get no CloudFront object at all
+ * (unmeasured, not observed empty); every object before `fromMs` is still byte for byte the same.
  */
 export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, environment = 'prod', withhold = null }) {
   const rng = createRng(seed, 'emit');
@@ -104,7 +107,7 @@ export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, 
   const host = distributionDomain;
 
   for (const req of sim.requests) {
-    const held = !!withhold && ((req.kind === 'api' && withhold.routes.has(`${req.method} ${req.route}`))
+    const held = !!withhold && (withhold.all === true || (req.kind === 'api' && withhold.routes.has(`${req.method} ${req.route}`))
       || (req.activity !== undefined && withhold.activities?.has(req.activity)));
     const kept = (ms) => !held || ms < withhold.fromMs;
     let edgeMs;
@@ -192,6 +195,7 @@ export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, 
   }
 
   for (const e of sim.systemEvents) {
+    if (withhold?.all && e.ts >= withhold.fromMs) continue;
     pushApp(e.service, e.ts, buildEventRecord({
       ...common(e.service, e.ts, e),
       userPseudoId: pu(e.userId),
@@ -211,6 +215,9 @@ export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, 
   for (const key of [...cfLines.keys()].sort()) {
     const lines = cfLines.get(key).sort((a, b) => a[0] - b[0]).map(([, line]) => line);
     const unique = rng.upper(8);
+    // the history stage: no object at all for an hour of the recent window (an object, even
+    // header-only, would make the hour observed, and its routes read as observed zeros)
+    if (withhold?.all && Date.parse(`${key.slice(0, 10)}T${key.slice(11)}:00:00Z`) >= withhold.fromMs) continue;
     cloudfront.set(`cloudfront/${distributionId}.${key}.${unique}.gz`, gzipSync(Buffer.from(CLOUDFRONT_HEADER + lines.join('\n') + '\n'), { level: 9 }));
   }
   return { appLogs, cloudfront, userPseudo };

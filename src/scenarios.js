@@ -106,6 +106,17 @@ export function validateScenario(def) {
 //   state_withheld           state documents (or the named part of one) written empty in
 //                            that stage.
 //
+// `history_stage` (optional) is stage 0, loaded BEFORE the application is onboarded: the
+// agent reads the earlier window only once, right after its first read, and that first
+// read is the onboarding one. Stage 0 holds the final earlier window, the app's starting
+// state, and of the recent window only what no case is about: its withheld routes,
+// activities and state include stage 1's (a stage only adds). `recent_traffic_withheld:
+// "all"` withholds every line from recent_window_from_day on, on every route (unmeasured,
+// never an observed zero); q4-three-signals does not use it, because with no recent day
+// observed the goals' daily series hold only the earlier window, and the agent's
+// goal-trend rule finds the lapse and the checkout change that begin inside it
+// (test/governance-agent.test.js shows both).
+//
 // The last stage withholds nothing, so it is the scenario's own output byte for byte.
 // Each later stage withholds a subset of the one before: a stage only ever ADDS traffic,
 // never removes any, because the agent keeps the highest distinct-user count it has read
@@ -118,7 +129,7 @@ function validateStagedReveal(id, def) {
   const r = def.staged_reveal;
   if (r === undefined) return;
   if (!r || typeof r !== 'object') fail(id, 'staged_reveal must be an object');
-  const extra = Object.keys(r).filter((k) => !['recent_window_from_day', 'why', 'stages'].includes(k));
+  const extra = Object.keys(r).filter((k) => !['recent_window_from_day', 'why', 'history_stage', 'stages'].includes(k));
   if (extra.length) fail(id, `unknown staged_reveal keys: ${extra.join(', ')}`);
   if (!inWindow(r.recent_window_from_day) || r.recent_window_from_day < -59) fail(id, 'staged_reveal.recent_window_from_day is a day inside -59..-1');
   if (typeof r.why !== 'string' || r.why.length < 10) fail(id, 'staged_reveal.why must be a sentence');
@@ -150,12 +161,39 @@ function validateStagedReveal(id, def) {
     }
     previous = s;
   });
+  if (r.history_stage !== undefined) {
+    const h = r.history_stage;
+    const where = 'staged_reveal.history_stage';
+    if (!h || typeof h !== 'object') fail(id, `${where} must be an object`);
+    const keys = Object.keys(h).filter((k) => !['loads', 'expected_new_finding', 'recent_traffic_withheld', 'recent_activity_withheld', 'state_withheld'].includes(k));
+    if (keys.length) fail(id, `unknown ${where} keys: ${keys.join(', ')}`);
+    for (const k of ['loads', 'expected_new_finding']) if (typeof h[k] !== 'string' || h[k].length < 10) fail(id, `${where}.${k} must be a sentence`);
+    const first = r.stages[0];
+    if (h.recent_traffic_withheld !== 'all') {
+      if (!Array.isArray(h.recent_traffic_withheld) || h.recent_traffic_withheld.some((k) => !ROUTE_KEY.test(k)) || new Set(h.recent_traffic_withheld).size !== h.recent_traffic_withheld.length) {
+        fail(id, `${where}.recent_traffic_withheld is "all" or lists "METHOD /api/route" pairs, once each`);
+      }
+      const acts = h.recent_activity_withheld ?? [];
+      if (!Array.isArray(acts) || acts.some((k) => !ACTIVITY_WITHHOLDABLE.includes(k))) fail(id, `${where}.recent_activity_withheld lists some of ${ACTIVITY_WITHHOLDABLE.join(', ')}`);
+      for (const k of first.recent_traffic_withheld) if (!h.recent_traffic_withheld.includes(k)) fail(id, `stage 1 withholds ${k}, which the history stage showed: a stage only adds`);
+      for (const k of first.recent_activity_withheld ?? []) if (!acts.includes(k)) fail(id, `stage 1 withholds ${k}, which the history stage showed: a stage only adds`);
+      if (h.recent_traffic_withheld.length + acts.length === first.recent_traffic_withheld.length + (first.recent_activity_withheld ?? []).length) fail(id, 'stage 1 reveals no traffic the history stage withholds: each stage adds a case');
+    } else if (h.recent_activity_withheld !== undefined) {
+      fail(id, `${where}: with recent_traffic_withheld "all" there is no recent activity left to withhold`);
+    }
+    if (!Array.isArray(h.state_withheld) || h.state_withheld.some((k) => !STATE_WITHHOLDABLE.includes(k))) fail(id, `${where}.state_withheld lists some of ${STATE_WITHHOLDABLE.join(', ')}`);
+    for (const k of first.state_withheld) if (!h.state_withheld.includes(k)) fail(id, `stage 1 withholds ${k}, which the history stage wrote: a stage only adds`);
+  }
   const last = r.stages.at(-1);
   if (last.recent_traffic_withheld.length || (last.recent_activity_withheld ?? []).length || last.state_withheld.length) fail(id, 'the last stage withholds nothing: it is the whole scenario');
 }
 
-/** Number of stages of a staged scenario, or 0. */
+/** Number of stages of a staged scenario that add a case (the history stage, stage 0, is not counted), or 0. */
 export const stageCount = (def) => def?.staged_reveal?.stages?.length ?? 0;
+/** Whether a staged scenario has a history stage (stage 0, loaded before onboarding). */
+export const hasHistoryStage = (def) => !!def?.staged_reveal?.history_stage;
+/** The first stage a staged scenario is loaded with: 0 with a history stage, else 1. */
+export const firstStage = (def) => (hasHistoryStage(def) ? 0 : 1);
 
 /**
  * One stage of a staged scenario, normalised for the generator: `null` for no stage (the
@@ -165,11 +203,25 @@ export function stageOf(def, stage) {
   if (stage === null || stage === undefined) return null;
   const count = stageCount(def);
   if (!count) throw new Error(`scenario ${def.id} has no stages`);
-  if (!Number.isInteger(stage) || stage < 1 || stage > count) throw new Error(`scenario ${def.id} has stages 1 to ${count}, not ${stage}`);
+  const first = firstStage(def);
+  if (!Number.isInteger(stage) || stage < first || stage > count) throw new Error(`scenario ${def.id} has stages ${first} to ${count}, not ${stage}`);
+  if (stage === 0) {
+    const h = def.staged_reveal.history_stage;
+    const all = h.recent_traffic_withheld === 'all';
+    return {
+      stage: 0, count, final: false, history: true, addsCase: 0,
+      fromDay: def.staged_reveal.recent_window_from_day,
+      allRecentWithheld: all,
+      withheldRoutes: new Set(all ? [] : h.recent_traffic_withheld),
+      withheldActivities: new Set(all ? [] : h.recent_activity_withheld ?? []),
+      stateWithheld: new Set(h.state_withheld),
+    };
+  }
   const s = def.staged_reveal.stages[stage - 1];
   return {
-    stage, count, final: stage === count, addsCase: s.adds_case,
+    stage, count, final: stage === count, history: false, addsCase: s.adds_case,
     fromDay: def.staged_reveal.recent_window_from_day,
+    allRecentWithheld: false,
     withheldRoutes: new Set(s.recent_traffic_withheld),
     withheldActivities: new Set(s.recent_activity_withheld ?? []),
     stateWithheld: new Set(s.state_withheld),
@@ -407,7 +459,7 @@ export function publicCard(def) {
   return {
     id: def.id, title: def.title, description: def.description,
     ...(def.cases ? { cases: def.cases } : {}),
-    ...(stageCount(def) ? { stages: stageCount(def) } : {}),
+    ...(stageCount(def) ? { stages: stageCount(def), firstStage: firstStage(def) } : {}),
   };
 }
 
@@ -422,7 +474,19 @@ const STATE_WORDS = {
 export function plainStages(def) {
   const r = def.staged_reveal;
   if (!r) return [];
-  return r.stages.map((s, i) => {
+  const history = r.history_stage ? [{
+    stage: 0, addsCase: 0,
+    lines: [
+      'Stage 0 loads the history, before the application is onboarded in the Governance Agent.',
+      `${r.history_stage.loads}`,
+      r.history_stage.recent_traffic_withheld === 'all'
+        ? `From ${-r.recent_window_from_day} days before the start date on, nothing is in the logs: no request on any route, no event, no log line.`
+        : `From ${-r.recent_window_from_day} days before the start date on, these requests are left out of the logs: ${r.history_stage.recent_traffic_withheld.join(', ')}${(r.history_stage.recent_activity_withheld ?? []).includes(FOLLOW_UP_SURGE) ? ", and the staff's follow-up of required training above its earlier level" : ''}. Everything before that day is the same as in the last stage.`,
+      ...(r.history_stage.state_withheld.length ? [`In the app's starting state ${r.history_stage.state_withheld.map((k) => STATE_WORDS[k]).join(', and ')}.`] : []),
+      `Expected: ${r.history_stage.expected_new_finding}`,
+    ],
+  }] : [];
+  return [...history, ...r.stages.map((s, i) => {
     const caseTitle = def.cases[s.adds_case - 1].title;
     const lines = [`Stage ${i + 1} adds case ${s.adds_case}: ${caseTitle}.`];
     const activities = s.recent_activity_withheld ?? [];
@@ -438,5 +502,5 @@ export function plainStages(def) {
     if (s.state_withheld.length) lines.push(`In the app's starting state ${s.state_withheld.map((k) => STATE_WORDS[k]).join(', and ')}.`);
     lines.push(`Expected: ${s.expected_new_finding}`);
     return { stage: i + 1, addsCase: s.adds_case, lines };
-  });
+  })];
 }

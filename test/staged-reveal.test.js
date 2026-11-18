@@ -54,7 +54,7 @@ const cfLines = (body) => gunzipSync(body).toString('utf8').split('\n').filter((
 const F = Object.fromEntries(CLOUDFRONT_FIELDS.map((f, i) => [f, i]));
 
 before(() => {
-  for (const stage of [1, 2, 3]) stages.set(stage, generate({ ...ARGS, stage }));
+  for (const stage of [0, 1, 2, 3]) stages.set(stage, generate({ ...ARGS, stage }));
 });
 
 test('stage 3 is q4-three-signals byte for byte (and so is no stage); stages 1 and 2 are not', () => {
@@ -65,10 +65,53 @@ test('stage 3 is q4-three-signals byte for byte (and so is no stage); stages 1 a
   assert.notEqual(digest(stages.get(1)), digest(stages.get(2)));
 });
 
+test('stage 0, the history: days -60..-30 byte for byte as in every later stage; from day -29 on only what no case is about (no lesson, checkout or surge line)', () => {
+  const zero = stages.get(0);
+  const fromMs = zero.sim.anchorMs + def.staged_reveal.recent_window_from_day * DAY_MS;
+  const st0 = stageOf(def, 0);
+  const st1 = stageOf(def, 1);
+  for (const route of st1.withheldRoutes) assert.ok(st0.withheldRoutes.has(route), `stage 0 withholds what stage 1 withholds: ${route}`);
+  for (const route of ['GET /api/lessons/{lessonId}', 'POST /api/lessons/{lessonId}/progress']) assert.ok(st0.withheldRoutes.has(route) && !st1.withheldRoutes.has(route), `case 1's ${route} comes with stage 1`);
+  const view = stageView(zero.sim, st0);
+  assert.equal(view.requests.filter((r) => r.ts >= fromMs && r.kind === 'api' && st0.withheldRoutes.has(`${r.method} ${r.route}`)).length, 0);
+  assert.equal(view.requests.filter((r) => r.ts < fromMs).length, zero.sim.requests.filter((r) => r.ts < fromMs).length, 'every request before day -29 is there');
+  for (const [svc, c] of Object.entries(zero.stats.capabilities)) assert.deepEqual(c.inactiveRoutes, [], `${svc}: nothing crosses the bars`);
+  const full = stages.get(3).stats.capabilities;
+  for (const route of ['/api/lessons/{lessonId}', '/api/courses/{courseId}/lessons', '/api/lessons/{lessonId}/progress', '/api/lessons/{lessonId}/quiz']) {
+    assert.deepEqual(zero.stats.capabilities.learning.routes[route], { ...full.learning.routes[route], recent: 0, dropPct: null }, `${route}: the final earlier window, no recent one`);
+  }
+  assert.deepEqual(zero.stats.capabilities.learning.routes['/api/me/progress'], full.learning.routes['/api/me/progress'], 'the busiest learning route reads as in the full scenario');
+  // the earlier window's follow-up is the final one (only "followed by a lesson within 7 days"
+  // can differ: a reminder late in the earlier window may be followed by a lesson in the recent one)
+  const { remindersFollowedByLessonIn7Days: _f0, ...k0 } = zero.stats.compliance.windows.earlier;
+  const { remindersFollowedByLessonIn7Days: _f3, ...k3 } = stages.get(3).stats.compliance.windows.earlier;
+  assert.deepEqual(k0, k3);
+});
+
+test('a history stage with "all": days -60..-30 byte for byte, nothing at all from day -29 on (no line, no system event, no CloudFront object)', () => {
+  const { recent_activity_withheld: _a, ...h } = def.staged_reveal.history_stage;
+  const empty = validateScenario({ ...def, staged_reveal: { ...def.staged_reveal, history_stage: { ...h, recent_traffic_withheld: 'all' } } });
+  const zero = generate({ ...ARGS, scenario: empty, stage: 0 });
+  const fromMs = zero.sim.anchorMs + def.staged_reveal.recent_window_from_day * DAY_MS;
+  const hourOf = (key) => Date.parse(`${key.match(/\.(\d{4}-\d{2}-\d{2})-(\d{2})\./).slice(1).join('T')}:00:00Z`);
+  const r = stages.get(1);
+  const earlierCf = [...r.cloudfront.keys()].filter((k) => hourOf(k) < fromMs);
+  assert.deepEqual([...zero.cloudfront.keys()], earlierCf, 'the same CloudFront objects before day -29, under the same keys, and none after');
+  for (const k of earlierCf) assert.ok(zero.cloudfront.get(k).equals(r.cloudfront.get(k)), `${k} byte for byte`);
+  const earlierApp = [...r.appLogs.keys()].filter((k) => Date.parse(`${k.match(/dt=(\d{4}-\d{2}-\d{2})/)[1]}T00:00:00Z`) < fromMs);
+  assert.deepEqual([...zero.appLogs.keys()], earlierApp);
+  for (const k of earlierApp) assert.equal(zero.appLogs.get(k), r.appLogs.get(k), k);
+  assert.equal(zero.cloudfront.size, 31 * 24, 'one CloudFront object per hour of days -60..-30');
+  const view = stageView(zero.sim, stageOf(empty, 0));
+  assert.equal(view.requests.filter((q) => q.ts >= fromMs).length, 0);
+  assert.equal(view.systemEvents.filter((e) => e.ts >= fromMs).length, 0);
+  assert.throws(() => validateScenario({ ...empty, staged_reveal: { ...empty.staged_reveal, history_stage: { ...empty.staged_reveal.history_stage, recent_activity_withheld: [FOLLOW_UP_SURGE] } } }), /no recent activity left to withhold/);
+});
+
 test('a stage only leaves lines out: same objects, every other line identical, the left-out lines are the withheld routes and activity from day -29 on', () => {
   const full = stages.get(3);
   const routeOf = new Map(full.sim.requests.filter((r) => r.kind === 'api').map((r) => [`${r.method} ${r.path}`, r.route]));
-  for (const stage of [1, 2]) {
+  for (const stage of [0, 1, 2]) {
     const st = stageOf(def, stage);
     const fromMs = full.sim.anchorMs + st.fromDay * DAY_MS;
     const withhold = stageWithhold(full.sim, st);
@@ -137,7 +180,7 @@ test('revealed routes have the same distinct people per window in every stage; a
   const full = cloudfrontActors(stages.get(3));
   const activityRoutes = new Set(stages.get(3).sim.requests.filter((r) => r.activity === FOLLOW_UP_SURGE).map((r) => `${r.method} ${r.route}`));
   assert.ok(activityRoutes.has(`GET ${TRAINING_ROUTE}`) && activityRoutes.has(`POST ${MESSAGE}`));
-  for (const stage of [1, 2]) {
+  for (const stage of [0, 1, 2]) {
     const st = stageOf(def, stage);
     const mine = cloudfrontActors(stages.get(stage));
     for (const [key, n] of full) {
@@ -150,21 +193,22 @@ test('revealed routes have the same distinct people per window in every stage; a
     for (const route of [`GET ${TRAINING_ROUTE}`, `POST ${MESSAGE}`, 'GET /api/admin/learners']) assert.equal(mine.get(`${route}|recent`), 1, `stage ${stage}: ${route} from the office`);
     assert.deepEqual([...mine.keys()].filter((k) => !full.has(k)), [], `stage ${stage}: nothing the full scenario does not have`);
   }
-  // each stage reveals more than the one before, and stage 2 shows what stage 1 shows
-  const one = cloudfrontActors(stages.get(1));
-  const two = cloudfrontActors(stages.get(2));
+  // each stage reveals more than the one before, and shows what the one before shows
+  const [zero, one, two] = [0, 1, 2].map((n) => cloudfrontActors(stages.get(n)));
+  for (const [key, n] of zero) assert.equal(one.get(key), n, `stage 1 keeps ${key}`);
   for (const [key, n] of one) assert.equal(two.get(key), n, `stage 2 keeps ${key}`);
-  assert.ok(two.size > one.size);
+  assert.ok(one.size > zero.size && two.size > one.size);
 });
 
-test('the starting state: stage 1 has no carts, stage 2 adds them, stage 3 adds the reminders of the surge; accounts, assignments and Help are there from stage 1', () => {
-  const [one, two, three] = [1, 2, 3].map((s) => stages.get(s).data);
+test('the starting state: carts, accounts, assignments and Help are there from the history on (stage 0); only stage 3 adds the reminders of the surge', () => {
+  const [zero, one, two, three] = [0, 1, 2, 3].map((s) => stages.get(s).data);
   const surge = stages.get(3).sim.activityNotifications.get(FOLLOW_UP_SURGE);
   assert.ok(surge.size >= 120, `${surge.size} reminders in the surge`);
-  assert.deepEqual(one.carts, []);
-  assert.deepEqual(two.carts, three.carts);
   assert.ok(three.carts.length >= 120);
-  for (const domain of ['users', 'courses', 'lessons', 'enrolments', 'progress', 'subscriptions', 'quiz_results', 'support_requests', 'organizations', 'training_assignments']) {
+  for (const data of [zero, one, two]) assert.deepEqual(data.carts, three.carts, 'the carts are the final ones from stage 0');
+  assert.ok(zero.carts.some((c) => c.user_id === 'usr_5d81f0c3a9e6' && c.items.length === 2), "Marco's two courses wait from stage 0");
+  assert.deepEqual(zero, one, 'the history and stage 1 have the same starting state');
+  for (const domain of ['users', 'courses', 'lessons', 'enrolments', 'progress', 'subscriptions', 'quiz_results', 'support_requests', 'organizations', 'training_assignments', 'carts']) {
     assert.deepEqual(one[domain], three[domain], `stage 1 ${domain}`);
     assert.deepEqual(two[domain], three[domain], `stage 2 ${domain}`);
   }
@@ -232,20 +276,27 @@ test('each stage adds exactly its case: the new drop or surge appears, the earli
 test('the stage definitions: validated, sealed one fingerprint per stage, revealed in plain words, never on the card', () => {
   assert.equal(stageCount(def), 3);
   assert.equal(stageCount(getScenario('abandoned-carts')), 0);
-  assert.throws(() => stageOf(def, 4), /stages 1 to 3/);
+  assert.throws(() => stageOf(def, 4), /stages 0 to 3/);
+  assert.throws(() => stageOf(def, -1), /stages 0 to 3/);
+  assert.equal(stageOf(def, 0).history, true);
+  assert.equal(stageOf(def, 0).final, false);
   assert.throws(() => stageOf(getScenario('steady-state'), 1), /no stages/);
   assert.equal(stageOf(def, null), null);
   assert.equal(stageOf(def, 3).final, true);
-  const fps = [1, 2, 3].map((stage) => scenarioFingerprint(def, { seed: 42, anchor: ANCHOR, stage }));
-  assert.equal(new Set([...fps, scenarioFingerprint(def, { seed: 42, anchor: ANCHOR })]).size, 4, 'each stage has its own fingerprint');
+  const fps = [0, 1, 2, 3].map((stage) => scenarioFingerprint(def, { seed: 42, anchor: ANCHOR, stage }));
+  assert.equal(new Set([...fps, scenarioFingerprint(def, { seed: 42, anchor: ANCHOR })]).size, 5, 'each stage has its own fingerprint');
+  assert.equal(sealedInput(def, { seed: 42, anchor: ANCHOR, stage: 0 }).stage, 0, 'stage 0 is sealed as a stage');
   assert.deepEqual(Object.keys(sealedInput(def, { seed: 42, anchor: ANCHOR })), ['anchor', 'scenario', 'seed'], 'without a stage the sealed text is unchanged');
   assert.equal(sealedInput(def, { seed: 42, anchor: ANCHOR, stage: 2 }).stage, 2);
   const plain = plainStages(def);
-  assert.equal(plain.length, 3);
-  assert.match(plain[0].lines.join(' '), /POST \/api\/courses\/\{courseId\}\/enrol/);
-  assert.match(plain[1].lines.join(' '), /follow-up of required training above its earlier level/);
-  assert.doesNotMatch(plain[1].lines.join(' '), /these requests are left out/);
-  assert.match(plain[2].lines.join(' '), /Nothing is left out/);
+  assert.equal(plain.length, 4);
+  assert.deepEqual(plain.map((p) => p.stage), [0, 1, 2, 3]);
+  assert.match(plain[0].lines.join(' '), /before the application is onboarded.*these requests are left out of the logs: GET \/api\/lessons\/\{lessonId\}/);
+  assert.match(plain[1].lines.join(' '), /POST \/api\/courses\/\{courseId\}\/enrol/);
+  assert.doesNotMatch(plain[1].lines.join(' '), /carts\.json\) are empty/, 'carts are not withheld any more');
+  assert.match(plain[2].lines.join(' '), /follow-up of required training above its earlier level/);
+  assert.doesNotMatch(plain[2].lines.join(' '), /these requests are left out/);
+  assert.match(plain[3].lines.join(' '), /Nothing is left out/);
   assert.deepEqual(publicCard(def).stages, 3);
   // the rules a staged reveal must keep
   const r = def.staged_reveal;
@@ -261,4 +312,15 @@ test('the stage definitions: validated, sealed one fingerprint per stage, reveal
   assert.throws(() => validateScenario(withStages((s, i) => (i === 1 ? { ...s, recent_activity_withheld: [] } : s))), /reveals no traffic|may only add traffic/);
   assert.throws(() => validateScenario(withStages((s, i) => (i === 2 ? { ...s, recent_activity_withheld: [FOLLOW_UP_SURGE] } : s))), /reveals no traffic|withholds nothing/);
   assert.throws(() => validateScenario(withStages((s) => ({ ...s, recent_activity_withheld: ['help_give_up'] }))), /recent_activity_withheld lists/);
+  // the history stage
+  const withHistory = (h) => ({ ...def, staged_reveal: { ...r, history_stage: { ...r.history_stage, ...h } } });
+  assert.throws(() => validateScenario(withHistory({ recent_traffic_withheld: ['GET /api/me/cart'] })), /stage 1 withholds POST \/api\/courses\/\{courseId\}\/enrol, which the history stage showed/);
+  assert.throws(() => validateScenario(withHistory({ recent_traffic_withheld: r.stages[0].recent_traffic_withheld })), /stage 1 reveals no traffic/);
+  assert.throws(() => validateScenario(withHistory({ recent_traffic_withheld: 'some' })), /is "all" or lists/);
+  assert.throws(() => validateScenario(withHistory({ recent_activity_withheld: [] })), /stage 1 withholds training_follow_up_surge, which the history stage showed/);
+  assert.throws(() => validateScenario(withHistory({ state_withheld: [] })), /stage 1 withholds training_follow_up_surge_notifications, which the history stage wrote/);
+  assert.throws(() => validateScenario(withHistory({ extra: true })), /unknown staged_reveal.history_stage keys: extra/);
+  const { history_stage: _h, ...noHistory } = r;
+  const without = validateScenario({ ...def, staged_reveal: noHistory });
+  assert.throws(() => stageOf(without, 0), /stages 1 to 3/, 'without a history stage the stages start at 1');
 });

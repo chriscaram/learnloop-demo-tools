@@ -1,8 +1,9 @@
 // The two outside systems the simulator touches, behind small interfaces so the
 // actions can be tested with fakes and so dry-run can strip every write:
 //
-//   aws  stackOutputs() · secret(id) · list(bucket, prefix, {maxPages}) · get(bucket, key)
-//        put(bucket, key, body, contentType) · deleteMany(bucket, keys)
+//   aws  stackOutputs(stackName) · secret(id) · list(bucket, prefix, {maxPages}) · get(bucket, key)
+//        getObject(bucket, key) -> { body, etag } | null (a whole state document, read before a merge)
+//        put(bucket, key, body, contentType, { ifMatch, ifNoneMatch }) · deleteMany(bucket, keys)
 //   git  branch() · status() · diffNames(paths) · add(paths) · stagedChanged(paths)
 //        commit(message) · push() · head()
 //
@@ -18,6 +19,7 @@ export const AWS_CALL_TIMEOUT_MS = 60_000;
 export const GIT_CALL_TIMEOUT_MS = 120_000;
 export const MAX_LIST_PAGES = 100; // 100,000 keys per prefix
 export const MAX_GET_BYTES = 4 * 1024 * 1024;
+export const MAX_STATE_BYTES = 64 * 1024 * 1024;
 
 export async function createAwsLayer({ region = process.env.AWS_REGION ?? 'us-east-1' } = {}) {
   const s3mod = await import('@aws-sdk/client-s3');
@@ -27,7 +29,7 @@ export async function createAwsLayer({ region = process.env.AWS_REGION ?? 'us-ea
   const opts = () => ({ abortSignal: AbortSignal.timeout(AWS_CALL_TIMEOUT_MS) });
   return {
     writes: true,
-    stackOutputs: () => readStackOutputs(),
+    stackOutputs: (stackName) => readStackOutputs(stackName, { region }),
     async secret(id) {
       return (await sm.send(new smmod.GetSecretValueCommand({ SecretId: id }), opts())).SecretString;
     },
@@ -48,8 +50,18 @@ export async function createAwsLayer({ region = process.env.AWS_REGION ?? 'us-ea
       const body = Buffer.from(await out.Body.transformToByteArray());
       return key.endsWith('.gz') ? gunzipSync(body) : body;
     },
-    async put(bucket, key, body, contentType) {
-      await s3.send(new s3mod.PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType }), opts());
+    async getObject(bucket, key) {
+      try {
+        const out = await s3.send(new s3mod.GetObjectCommand({ Bucket: bucket, Key: key }), opts());
+        if ((out.ContentLength ?? 0) > MAX_STATE_BYTES) throw new Error(`s3://${bucket}/${key} is larger than ${MAX_STATE_BYTES} bytes`);
+        return { body: Buffer.from(await out.Body.transformToByteArray()), etag: out.ETag ?? null };
+      } catch (error) {
+        if (error?.name === 'NoSuchKey' || error?.$metadata?.httpStatusCode === 404) return null;
+        throw error;
+      }
+    },
+    async put(bucket, key, body, contentType, { ifMatch, ifNoneMatch } = {}) {
+      await s3.send(new s3mod.PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType, IfMatch: ifMatch, IfNoneMatch: ifNoneMatch }), opts());
     },
     async deleteMany(bucket, keys) {
       if (keys.length > 1000) throw new Error('deleteMany takes at most 1000 keys');

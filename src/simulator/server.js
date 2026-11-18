@@ -13,10 +13,12 @@
 //   GET  /api/scenarios/:id/business-review   business-docs/<id>.md, as a download with a neutral file name
 //   GET  /api/fingerprint?scenario=&anchor=[&stage=]   SHA-256 of the sealed definition + seed + anchor [+ stage]
 //   GET  /api/scenarios/:id/reveal?anchor=    the whole definition, in plain words too (and every stage's fingerprint)
-//   GET  /api/state[?readBack=1]              what is loaded now (state/loaded.json) [+ bucket read-back]
-//   GET  /api/replay                          the last real generation's saved statistics
+//   GET  /api/state?target=[&readBack=1]      what is loaded now on that target (its record in state/loaded.json) [+ bucket read-back]
+//   GET  /api/replay?target=                  the last real generation's saved statistics
 //   POST /api/confirm      {action}           a single-use confirmation token (5 minutes)
-//   POST /api/actions/:name {scenario, stage, anchor, dryRun, pace, publish, token}   start an action (202) or 409/403
+//   POST /api/actions/:name {target, scenario, stage, anchor, dryRun, pace, publish, token}   start an action (202) or 409/403
+//
+// `target` is production (the LearnLoopProd stack, the default) or staging (LearnLoopStaging).
 //   GET  /api/runs/:id/events                 the run's progress, as SSE (replayed from the start)
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -27,7 +29,8 @@ import { parseArgs } from 'node:util';
 import { DATA_DIR, LEARNLOOP_REPO, OUT_DIR, TOOLS_ROOT } from '../files.js';
 import { todayUtc } from '../generate.js';
 import { loadScenarios, plainParameters, plainStages, publicCard, scenarioFingerprint, canonicalJson, sealedInput, stageCount, stageOf } from '../scenarios.js';
-import { ACTION_NAMES, APP_LOGS_PREFIX, CONFIRMED_ACTIONS, SEED, STAGED_LOAD_WORDING, STATE_PREFIX, createActions, summariseKeys } from './actions.js';
+import { ACTION_NAMES, APP_LOGS_PREFIX, CONFIRMED_ACTIONS, SEED, STAGED_LOAD_WORDING, STATE_PREFIX, TARGET_CHOICES, createActions, summariseKeys } from './actions.js';
+import { DEFAULT_TARGET, TARGETS } from '../stack.js';
 
 export const HOST = '127.0.0.1';
 export const DEFAULT_PORT = 8790;
@@ -57,6 +60,13 @@ function stageParam(def, raw) {
   } catch (error) {
     throw Object.assign(new Error(error.message), { status: 400 });
   }
+}
+
+/** The target a request names: production by default, 400 for anything else than a known one. */
+function targetParam(raw) {
+  if (raw === null || raw === undefined || raw === '') return DEFAULT_TARGET;
+  if (!TARGETS[raw]) throw Object.assign(new Error(`unknown target '${raw}': production or staging`), { status: 400 });
+  return raw;
 }
 
 function validAnchor(anchor) {
@@ -96,7 +106,7 @@ export function createSimulator({ aws, git, paths, scenariosDir, businessDocsDir
 
   function startRun(name, ctxBase) {
     const id = randomBytes(8).toString('hex');
-    const run = { id, name, dryRun: ctxBase.dryRun, events: [], listeners: new Set(), done: false, startedAt: now().toISOString() };
+    const run = { id, name, dryRun: ctxBase.dryRun, target: ctxBase.target, events: [], listeners: new Set(), done: false, startedAt: now().toISOString() };
     const emit = (event) => {
       if (run.events.length >= MAX_EVENTS_PER_RUN) return;
       const e = { ...event, at: now().toISOString() };
@@ -107,7 +117,7 @@ export function createSimulator({ aws, git, paths, scenariosDir, businessDocsDir
     while (runs.size > MAX_RUNS_KEPT) runs.delete(runs.keys().next().value);
     current = run;
     run.promise = (async () => {
-      emit({ type: 'start', action: name, dryRun: !!ctxBase.dryRun });
+      emit({ type: 'start', action: name, dryRun: !!ctxBase.dryRun, target: ctxBase.target });
       try {
         const result = await actions[name]({ ...ctxBase, emit });
         emit({ type: 'done', action: name, result });
@@ -141,13 +151,13 @@ export function createSimulator({ aws, git, paths, scenariosDir, businessDocsDir
     }
   }
 
-  async function readState({ readBack }) {
-    const read = async (file) => JSON.parse(await readFile(path.join(paths.stateDir, file), 'utf8').catch(() => 'null'));
-    const state = { loaded: await read('loaded.json'), generated: await read('generated.json'), dryRunGenerated: await read('dry-run/generated.json'), running: current ? { action: current.name, id: current.id, dryRun: current.dryRun } : null };
+  async function readState({ readBack, target }) {
+    const { lastRun, ...forTarget } = await actions.stateFor(target);
+    const state = { ...forTarget, stack: TARGETS[target].stack, running: current ? { action: current.name, id: current.id, dryRun: current.dryRun, target: current.target } : null };
     if (readBack) {
       try {
         const { uploadTargets } = await import('../stack.js');
-        const t = uploadTargets(await aws.stackOutputs());
+        const t = uploadTargets(await aws.stackOutputs(TARGETS[target].stack));
         state.buckets = {
           state: summariseKeys((await aws.list(t.stateBucket, STATE_PREFIX, { maxPages: 5 })).keys),
           appLogs: summariseKeys((await aws.list(t.appLogsBucket, APP_LOGS_PREFIX, { maxPages: 20 })).keys),
@@ -181,7 +191,7 @@ export function createSimulator({ aws, git, paths, scenariosDir, businessDocsDir
       }
       if (req.method === 'GET' && p === '/favicon.ico') { res.writeHead(204); return res.end(); }
       if (req.method === 'GET' && p === '/api/scenarios') {
-        return sendJson(res, 200, { scenarios: [...scenarios().values()].map(publicCard), defaultAnchor: todayUtc(now()), seed: SEED, confirmations: CONFIRMED_ACTIONS, stagedLoad: STAGED_LOAD_WORDING });
+        return sendJson(res, 200, { scenarios: [...scenarios().values()].map(publicCard), defaultAnchor: todayUtc(now()), seed: SEED, confirmations: CONFIRMED_ACTIONS, stagedLoad: STAGED_LOAD_WORDING, targets: TARGET_CHOICES, defaultTarget: DEFAULT_TARGET });
       }
       if (req.method === 'GET' && p === '/api/fingerprint') {
         const anchor = url.searchParams.get('anchor');
@@ -221,9 +231,9 @@ export function createSimulator({ aws, git, paths, scenariosDir, businessDocsDir
           ...(stages.length ? { stages } : {}),
         });
       }
-      if (req.method === 'GET' && p === '/api/state') return sendJson(res, 200, await readState({ readBack: url.searchParams.get('readBack') === '1' }));
+      if (req.method === 'GET' && p === '/api/state') return sendJson(res, 200, await readState({ readBack: url.searchParams.get('readBack') === '1', target: targetParam(url.searchParams.get('target')) }));
       if (req.method === 'GET' && p === '/api/replay') {
-        const last = JSON.parse(await readFile(path.join(paths.stateDir, 'last-run.json'), 'utf8').catch(() => 'null'));
+        const last = await (await actions.stateFor(targetParam(url.searchParams.get('target')))).lastRun();
         return sendJson(res, 200, { replay: last });
       }
       if (req.method === 'POST' && p === '/api/confirm') {
@@ -244,13 +254,17 @@ export function createSimulator({ aws, git, paths, scenariosDir, businessDocsDir
         const def = getDef(scenario);
         if (!validAnchor(anchor)) return sendJson(res, 400, { error: 'anchor must be a date like 2026-11-15' });
         const stage = stageParam(def, body.stage);
+        const target = targetParam(body.target);
         if (body.publish !== undefined && typeof body.publish !== 'boolean') return sendJson(res, 400, { error: 'publish is true or false' });
         if (body.publish !== undefined && !stageCount(def)) return sendJson(res, 400, { error: 'publish can be chosen only for a staged load' });
+        if ((body.publish === true || name === 'publish') && !TARGETS[target].publish) {
+          return sendJson(res, 400, { error: `publishing to LearnLoop's main is offered for Production only, not ${TARGETS[target].label}` });
+        }
         if (CONFIRMED_ACTIONS[name] && !takeToken(body.token, name)) {
           return sendJson(res, 403, { error: `${name} changes things outside this computer and needs a confirmation: confirm it in the dialog first` });
         }
         const paceMs = body.pace === 'fast' ? 0 : undefined;
-        const run = startRun(name, { scenario, stage, anchor, dryRun, paceMs, publish: body.publish });
+        const run = startRun(name, { target, scenario, stage, anchor, dryRun, paceMs, publish: body.publish });
         return sendJson(res, 202, { runId: run.id, action: name, dryRun });
       }
       const ev = p.match(/^\/api\/runs\/([0-9a-f]+)\/events$/);

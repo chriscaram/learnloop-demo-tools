@@ -3,11 +3,18 @@
 // like the LearnLoop contract checks. Read-only: it imports the agent's pure functions and
 // writes nothing there.
 //
-// It replays what the agent records for each "Get usage telemetry" over the CloudFront
-// traffic of each stage: the first read (onboarding) writes route baselines for days
-// -29..0 and then, once, for days -59..-30 (backend/src/cadence.js
-// continueAfterTelemetryIngest); every later read writes days -29..0 again
-// (platform/telemetry/ingestion.js: one baseline per route the read saw, busiest first).
+// It replays what the agent records for each read over the CloudFront traffic in the
+// buckets at that moment. The demo flow (README, "Presenting the staged reveal"): load the
+// history (stage 0), onboard LearnLoop the same day, then one "Get usage telemetry" after
+// each of stages 1, 2 and 3, on the SAME application. The first read is the onboarding one,
+// over stage 0's logs: route baselines for days -29..0 (there are none: stage 0 holds no
+// recent traffic) and then, once, for days -59..-30 (backend/src/cadence.js
+// continueAfterTelemetryIngest; a later read finds history_already_read). Every later read
+// writes days -29..0 again, over that stage's logs (platform/telemetry/ingestion.js: one
+// baseline per route the read saw, busiest first). The earlier window therefore comes ONLY
+// from the stage-0 read, and the reads merge as the agent merges them: every baseline row
+// is kept, the distinct users of a window are the max across them (drift/usage.js
+// actorWindowsOf), day counts the latest row.
 // Then it runs drift/detectors.js#observationsForGoal over all the rows, as
 // drift/index.js#loadDriftWorld assembles them, for three goals linked one to one to the
 // learning, catalog and admin capabilities (one service = one capability, the
@@ -17,8 +24,12 @@
 // aggregate_app_logs) counts for the manual follow-up rule: each stage's application-log
 // lines, emitted exactly as seed:upload writes them, go through
 // business-data/follow-up-patterns.js over the job's own 30-day windows (the current one at
-// every read, the earlier one once at onboarding), and the stored counts reach
-// observationsForGoal as drift/index.js#loadDriftWorld assembles them.
+// every read, the earlier one once at onboarding, over stage 0's logs), and the stored counts
+// reach observationsForGoal as drift/index.js#loadDriftWorld assembles them.
+//
+// The state documents the agent reads at each read are the LIVE ones: the stage's state
+// merged into what the app held (src/merge.js), with the notifications the approved AI
+// agents wrote between the stages (applied_by_agent) kept.
 //
 // Start dates on all seven weekdays.
 import { before, test } from 'node:test';
@@ -30,6 +41,8 @@ import { PLACEHOLDER_DISTRIBUTION_DOMAIN, PLACEHOLDER_DISTRIBUTION_ID, stageView
 import { emitLogs } from '../src/emit.js';
 import { DAY_MS, simulate } from '../src/model.js';
 import { canonicalJson, getScenario, stageOf } from '../src/scenarios.js';
+import { mergeState } from '../src/merge.js';
+import { completeState } from '../src/files.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const GA = path.resolve(process.env.GOVERNANCE_AGENT_REPO ?? path.join(HERE, '../../governance-agent'));
@@ -153,7 +166,17 @@ function detect(rows, capabilities, followUpRows = [], applicationRecords = null
   return observations;
 }
 
-/** The three reads of the staged reveal (onboarding with the history read, then one per stage), detected after each. */
+/** What an approved AI agent writes into the live notifications between two stages. */
+const agentNotes = (stage, data, anchor) => data.users.filter((u) => u.role === 'learner').slice(0, 25).map((u, i) => ({
+  id: `ntf_agent_${stage}_${i}`, user_id: u.id, type: stage === 1 ? 'lesson_reminder' : 'cart_reminder', title: 'Pick up where you left off', body: 'A short note from the AI agent.',
+  link: '/courses', created_at: new Date(Date.parse(`${anchor}T10:00:00Z`) + i * 1000).toISOString(), read_at: null, applied_by_agent: true,
+}));
+
+/**
+ * The four reads of the staged reveal: onboarding over the history (stage 0), with the
+ * history read, then one current-window read per stage, detected after each. Returns
+ * [stage 0, stage 1, stage 2, stage 3] observations.
+ */
 function detectStages(def, anchor) {
   const sim = simulate({ anchor, seed: 42, scenario: def });
   const services = [...new Set(sim.requests.filter((r) => r.kind === 'api').map((r) => r.service))];
@@ -174,11 +197,21 @@ function detectStages(def, anchor) {
     }
   };
   const seen = [];
-  for (const stage of [1, 2, 3]) {
+  let live = null;
+  for (const stage of [0, 1, 2, 3]) {
     const st = stageOf(def, stage);
     const { requests, data } = stageView(sim, st);
+    // the live state: stage 0 replaces it; a later stage merges into it, after the AI
+    // agent approved at the stage before wrote its notifications
+    const stageDocs = JSON.parse(JSON.stringify(completeState(data)));
+    if (stage === 0) live = stageDocs;
+    else {
+      if (stage >= 2) live.notifications.push(...agentNotes(stage - 1, live, anchor));
+      const base = JSON.parse(JSON.stringify(completeState(stageView(sim, stageOf(def, stage - 1)).data)));
+      live = Object.fromEntries(mergeState({ live, stage: stageDocs, base }).map((r) => [r.domain, r.document]));
+    }
     read(requests, current);
-    if (stage === 1) read(requests, history); // the history read happens once, at onboarding
+    if (stage === 0) read(requests, history); // the history read happens once, right after the onboarding read
     // The application logs of the same stage, as seed:upload writes them, read by the
     // follow-up aggregator over the job's windows (current every time, earlier once).
     const { appLogs } = emitLogs(sim, {
@@ -186,12 +219,13 @@ function detectStages(def, anchor) {
       withhold: stageWithhold(sim, st),
     });
     const knownRoutes = [...new Set(rows.map((r) => r.scope_key))];
-    const reads = stage === 1 ? [logWindow(anchor), logWindow(anchor, 1)] : [logWindow(anchor)];
+    const reads = stage === 0 ? [logWindow(anchor), logWindow(anchor, 1)] : [logWindow(anchor)];
     for (const w of reads) {
       clock += 5;
       followUpRows.push({ ...followUpRead(appLogs, w, knownRoutes), created_at: new Date(clock).toISOString() });
     }
-    seen.push(detect(rows, capabilities, followUpRows, recordsRead(data, anchor)));
+    seen.push(detect(rows, capabilities, followUpRows, recordsRead(live, anchor)));
+    seen.at(-1).rows = rows.length;
   }
   return seen;
 }
@@ -203,18 +237,23 @@ const key = (o) => `${o.goal}|${o.code}|${o.fingerprint}`;
 // read the full scenario's stages, so they share one computation per start date.
 const staged = new Map();
 const stagesOf = (def, anchor) => {
-  const k = `${def.id}|${def.parameters?.compliance === null ? 'nocompliance' : 'full'}|${anchor}`;
+  const k = `${def.id}|${def.parameters?.compliance === null ? 'nocompliance' : 'full'}|${def.staged_reveal.history_stage.recent_traffic_withheld === 'all' ? 'empty-history' : 'history'}|${anchor}`;
   if (!staged.has(k)) staged.set(k, detectStages(def, anchor));
   return staged.get(k);
 };
 
-test('the agent\'s own detectors: stage 1 raises the lesson finding only, stage 2 adds the enrol finding, stage 3 adds the manual follow-up finding, nothing earlier changes', { skip }, () => {
+test('the agent\'s own detectors: the history (stage 0) raises nothing, stage 1 the lesson finding only, stage 2 adds the enrol finding, stage 3 adds the manual follow-up finding, nothing earlier changes; the earlier window read only at stage 0', { skip }, () => {
   const def = getScenario('q4-three-signals');
   for (const anchor of ANCHORS) {
     const seen = stagesOf(def, anchor);
     const actor = (list, goal) => list.filter((o) => o.goal === goal && o.code === 'NBF-USAGE-ACTOR_INACTIVITY');
     const goalsWith = (list) => [...new Set(list.map((o) => o.goal))].sort();
-    const [s1, s2, s3] = seen;
+    const [s0, s1, s2, s3] = seen;
+    // stage 0, read at onboarding with the history read: nothing at all, on any goal
+    assert.deepEqual(s0.map((o) => [o.goal, o.code]), [], `${anchor} stage 0: ${JSON.stringify(s0.map((o) => [o.goal, o.code]))}`);
+    const followUpAt0 = s0.standDowns.filter((d) => d.goal_id === 'g_compliance').map((d) => d.reason);
+    assert.ok(followUpAt0.length <= 1, `${anchor} stage 0: ${followUpAt0}`);
+    assert.ok(s0.rows > 0, `${anchor} stage 0: the history read wrote the earlier window`);
     // stage 1: lessons only, and nothing at all about the store or the required training
     assert.deepEqual(goalsWith(s1), ['g_learn'], `${anchor} stage 1: ${JSON.stringify(s1.map((o) => [o.goal, o.code]))}`);
     assert.equal(actor(s1, 'g_learn').length, 1);
@@ -259,7 +298,7 @@ test('the agent\'s own detectors: stage 1 raises the lesson finding only, stage 
     assert.ok(added[0].signal_ids.includes('sig_records'), `${anchor}: the records read is cited (rule 12)`);
     assert.deepEqual(f.not_measured, ['message_wording']);
     // every observation of a stage is still there, with the same fingerprint, in the next
-    for (const [before, after, n] of [[s1, s2, 2], [s2, s3, 3]]) {
+    for (const [before, after, n] of [[s0, s1, 1], [s1, s2, 2], [s2, s3, 3]]) {
       const later = new Set(after.map(key));
       for (const o of before) assert.ok(later.has(key(o)), `${anchor} stage ${n} keeps ${o.goal} ${o.code} ${o.fingerprint}`);
     }
@@ -282,11 +321,29 @@ test('the compliance case leaves the lesson and enrol findings as they are, in e
   for (const anchor of ['2026-11-15', '2026-11-18', '2026-11-21']) {
     const [a, b] = [stagesOf(def, anchor), stagesOf(without, anchor)];
     const others = (list) => list.filter((o) => o.code !== FOLLOW_UP).map((o) => `${o.goal}|${o.code}`).sort();
-    for (let i = 0; i < 3; i += 1) {
-      assert.deepEqual(view(a[i]), view(b[i]), `${anchor} stage ${i + 1}: the inactivity findings`);
-      assert.deepEqual(others(a[i]), others(b[i]), `${anchor} stage ${i + 1}: the same observations`);
-      assert.ok(!b[i].some((o) => o.code === FOLLOW_UP), `${anchor} stage ${i + 1}: no follow-up finding without the compliance case`);
+    for (let i = 0; i < 4; i += 1) {
+      assert.deepEqual(view(a[i]), view(b[i]), `${anchor} stage ${i}: the inactivity findings`);
+      assert.deepEqual(others(a[i]), others(b[i]), `${anchor} stage ${i}: the same observations`);
+      assert.ok(!b[i].some((o) => o.code === FOLLOW_UP), `${anchor} stage ${i}: no follow-up finding without the compliance case`);
     }
   }
 });
 
+
+// Why the history stage keeps the ordinary recent activity (the routes no case is about)
+// instead of no recent traffic at all: with nothing observed after day -30, a goal's daily
+// series holds only days -59..-30, inside which the lapse (days -45..-31) and the checkout
+// change (from days -40..-30) already begin, so the goal-trend rule's split halves fall and
+// it raises the lesson AND the purchase goal at onboarding, before either case is loaded.
+test('the history stage with NO recent traffic at all would raise the goal trend on the lesson and purchase goals at onboarding (why stage 0 keeps the ordinary recent activity)', { skip }, () => {
+  const def = getScenario('q4-three-signals');
+  const r = def.staged_reveal;
+  const { recent_activity_withheld: _a, ...h } = r.history_stage;
+  const empty = { ...def, staged_reveal: { ...r, history_stage: { ...h, recent_traffic_withheld: 'all' } } };
+  for (const anchor of ['2026-11-15', '2026-11-21']) {
+    const [s0] = stagesOf(empty, anchor);
+    const trend = s0.filter((o) => o.code === 'NBF-DRIFT-GOAL_TREND_NEGATIVE').map((o) => o.goal).sort();
+    assert.deepEqual(trend, ['g_cart', 'g_learn'], `${anchor}: ${JSON.stringify(s0.map((o) => [o.goal, o.code]))}`);
+    assert.ok(!s0.some((o) => o.code === 'NBF-USAGE-ACTOR_INACTIVITY'), `${anchor}: no route has a recent window, so no inactivity`);
+  }
+});

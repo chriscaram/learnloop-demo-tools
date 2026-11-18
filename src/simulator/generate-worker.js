@@ -5,12 +5,24 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { runSeed } from '../cli.js';
 import { buildFeed } from './feed.js';
-import { completeState } from '../files.js';
+import path from 'node:path';
+import { rm } from 'node:fs/promises';
+import { completeState, writeData } from '../files.js';
+import { stageState } from '../generate.js';
+import { getScenario, stageOf } from '../scenarios.js';
 
 const started = Date.now();
 try {
-  const { options, dataDir, outDir } = workerData;
+  const { options, dataDir, outDir, baseStage = null } = workerData;
   const result = await runSeed(options, { dataDir, outDir });
+  // A later stage merges into the live state; its base is the state of the stage loaded
+  // before, from this same generation (src/merge.js), written next to the logs.
+  const baseDir = path.join(outDir, 'merge-base');
+  await rm(baseDir, { recursive: true, force: true });
+  if (baseStage !== null) {
+    const st = stageOf(getScenario(options.scenario), baseStage);
+    await writeData(stageState(result.sim.data, st, result.sim), baseDir);
+  }
   const elapsedMs = Date.now() - started;
   const feed = buildFeed({ appLogs: result.appLogs, data: result.data, anchorMs: result.sim.anchorMs, seed: options.seed });
   parentPort.postMessage({

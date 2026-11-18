@@ -6,13 +6,21 @@
 //
 // Bucket names, the CloudFront prefix and the distribution come from the LearnLoop
 // stack outputs (../stack.js uploadTargets) and from nowhere else; an action never reads
-// a bucket, key or prefix from the request.
+// a bucket, key or prefix from the request. The request names only the TARGET
+// (production or staging, ../stack.js TARGETS), which decides the stack.
+//
+// Per target: the stack outputs, the salt, the buckets, the generated files and the
+// loaded-state record (one record per target in state/loaded.json), so the stages
+// progress on each target on their own. Production generates into LearnLoop's data/seed
+// and ./out as before; Staging into state/staging/{seed,out}, so a staging load never
+// touches LearnLoop's repository. Publishing to LearnLoop's main is Production only.
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
-import { uploadTargets } from '../stack.js';
-import { uploadObjects, uploadSets } from '../upload.js';
-import { getScenario, scenarioFingerprint, stageOf } from '../scenarios.js';
+import { DEFAULT_TARGET, TARGETS, isStackMissing, targetOf, uploadTargets } from '../stack.js';
+import { mergesState, readStateDir, stateDocuments, uploadObjects, uploadSets, uploadState } from '../upload.js';
+import { firstStage, getScenario, scenarioFingerprint, stageOf } from '../scenarios.js';
+import { mergeSentence, totals as mergeTotals } from '../merge.js';
 import { PLACEHOLDER_DISTRIBUTION_DOMAIN, PLACEHOLDER_DISTRIBUTION_ID } from '../generate.js';
 import { catalogIndex, cloudfrontSentence, eventSentence, requestSentence } from './feed.js';
 import { createRng } from '../rng.js';
@@ -37,6 +45,17 @@ function readOnly(layer, name) {
   return { ...layer, writes: false, put: blocked('put'), deleteMany: blocked('deleteMany'), add: blocked('add'), commit: blocked('commit'), push: blocked('push') };
 }
 
+const hasStage = (stage) => stage !== null && stage !== undefined;
+/** "stage 0 (the history)", "stage 2": how a stage is named in messages. */
+export const stageWords = (stage) => (stage === 0 ? 'the history (stage 0)' : `stage ${stage}`);
+
+/** state/loaded.json holds one record per target; a file from before targets is Production's. */
+export function loadedByTarget(file) {
+  if (!file) return {};
+  if (Object.hasOwn(file, 'scenario')) return { [DEFAULT_TARGET]: file };
+  return Object.fromEntries(Object.entries(file).filter(([k]) => TARGETS[k]));
+}
+
 async function readJson(file) {
   try {
     return JSON.parse(await readFile(file, 'utf8'));
@@ -59,17 +78,34 @@ export function summariseKeys(keys) {
 }
 
 export function createActions({ aws, git, paths, scenarios = getScenario, now = () => new Date(), workerUrl = new URL('./generate-worker.js', import.meta.url), env = process.env }) {
-  const stateFile = (dryRun, name) => path.join(paths.stateDir, ...(dryRun ? ['dry-run'] : []), name);
-  const dataDirFor = (dryRun) => (dryRun ? path.join(paths.stateDir, 'dry-run', 'seed') : paths.dataDir);
-  const outDirFor = (dryRun) => (dryRun ? path.join(paths.stateDir, 'dry-run', 'out') : paths.outDir);
+  // Production keeps the folders it always had; another target has its own subfolder.
+  const targetDir = (dryRun, target = DEFAULT_TARGET) => path.join(paths.stateDir, ...(dryRun ? ['dry-run'] : []), ...(target === DEFAULT_TARGET ? [] : [target]));
+  const stateFile = (dryRun, name, target = DEFAULT_TARGET) => path.join(targetDir(dryRun, target), name);
+  const dataDirFor = (dryRun, target = DEFAULT_TARGET) => (!dryRun && target === DEFAULT_TARGET ? paths.dataDir : path.join(targetDir(dryRun, target), 'seed'));
+  const outDirFor = (dryRun, target = DEFAULT_TARGET) => (!dryRun && target === DEFAULT_TARGET ? paths.outDir : path.join(targetDir(dryRun, target), 'out'));
   const layers = (dryRun) => ({ aws: dryRun ? readOnly(aws, 'aws') : aws, git: dryRun ? readOnly(git, 'git') : git });
+  const targetOfCtx = (ctx) => targetOf(ctx.target ?? DEFAULT_TARGET);
+  const loadedFile = path.join(paths.stateDir, 'loaded.json');
+  async function readLoaded(target) {
+    return loadedByTarget(await readJson(loadedFile))[target] ?? null;
+  }
+  async function writeLoaded(target, record) {
+    const all = loadedByTarget(await readJson(loadedFile));
+    await writeJson(loadedFile, { ...all, [target]: record });
+  }
 
   async function targetsFor(ctx, { allowFallback = false } = {}) {
+    const t = targetOfCtx(ctx);
     try {
-      return uploadTargets(await layers(ctx.dryRun).aws.stackOutputs());
+      return uploadTargets(await layers(ctx.dryRun).aws.stackOutputs(t.stack));
     } catch (error) {
-      if (!allowFallback) throw error;
-      ctx.emit({ type: 'note', message: `Dry run: the LearnLoop stack outputs could not be read (${error.message}). Placeholder names are used; nothing is sent anywhere.` });
+      const missing = isStackMissing(error);
+      if (!allowFallback) {
+        throw new ActionError(missing
+          ? `${t.label}: the LearnLoop stack ${t.stack} was not found. It is not deployed (yet) in this AWS account and region; deploy it, or choose the other target. Nothing was changed.`
+          : `${t.label}: the outputs of the LearnLoop stack ${t.stack} could not be read (${error.message}). Nothing was changed.`);
+      }
+      ctx.emit({ type: 'note', message: `Dry run: the outputs of the ${t.label} stack ${t.stack} could not be read (${missing ? 'the stack was not found: it is not deployed yet' : error.message}). Placeholder names are used; nothing is sent anywhere.` });
       return {
         stateBucket: '(state bucket)', appLogsBucket: '(app-logs bucket)', accessLogsBucket: '(access-logs bucket)', cloudfrontPrefix: 'cloudfront/',
         distributionId: PLACEHOLDER_DISTRIBUTION_ID, distributionDomain: PLACEHOLDER_DISTRIBUTION_DOMAIN, saltSecret: null, placeholder: true,
@@ -114,23 +150,36 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
   // ------------------------------------------------------------------ the stage order
   // A staged scenario adds one case per load to ONE Governance Agent application, so a
   // stage only makes sense on top of the one before, with the same start date (README,
-  // "Presenting the staged reveal"). Stage 1 is always allowed: it is also how the
-  // presenter starts over. Returns the reason a stage cannot be loaded now, or null.
+  // "Presenting the staged reveal"), on the same target. The first stage (the history,
+  // stage 0, when the scenario has one) is always allowed: it is also how the presenter
+  // starts over. Returns the reason a stage cannot be loaded now, or null.
   async function stageOrderProblem(ctx) {
     const stage = ctx.stage ?? null;
-    if (!stage || stage === 1) return null;
-    const loaded = await readJson(stateFile(false, 'loaded.json'));
-    if (!loaded || loaded.scenario !== ctx.scenario || !loaded.stage) {
-      return `stage ${stage} adds to stage ${stage - 1}, and no stage of this scenario is loaded: load stage 1 first`;
+    if (!hasStage(stage)) return null;
+    const def = scenarios(ctx.scenario);
+    const first = firstStage(def);
+    if (stage === first) return null;
+    const t = targetOfCtx(ctx);
+    const loaded = await readLoaded(t.id);
+    const startOver = first === 0 ? 'start over with the history (stage 0)' : `start over with stage ${first}`;
+    if (!loaded || loaded.scenario !== ctx.scenario || !hasStage(loaded.stage)) {
+      return `stage ${stage} adds to ${stageWords(stage - 1)}, and no stage of this scenario is loaded on ${t.label}: load ${stageWords(first)} first`;
     }
     if (loaded.anchor !== ctx.anchor) {
-      return `stage ${stage} keeps the start date of the stages already loaded (${loaded.anchor}), not ${ctx.anchor}`;
+      return `stage ${stage} keeps the start date of the stages already loaded on ${t.label} (${loaded.anchor}), not ${ctx.anchor}`;
     }
-    if (loaded.stage < stage - 1) return `stage ${loaded.stage} is loaded: load stage ${loaded.stage + 1} before stage ${stage}`;
+    if (loaded.stage < stage - 1) return `${stageWords(loaded.stage)} is loaded on ${t.label}: load ${stageWords(loaded.stage + 1)} before stage ${stage}`;
     if (loaded.stage > stage) {
-      return `stage ${loaded.stage} is already loaded, and a stage never takes traffic away: to go back, start over with stage 1 and onboard the application in the Governance Agent again`;
+      return `${stageWords(loaded.stage)} is already loaded on ${t.label}, and a stage never takes traffic away: to go back, ${startOver} and onboard the application in the Governance Agent again`;
     }
     return null;
+  }
+  /** The stage the live state was loaded with, when a merge can use it as its base (same scenario, start date, an earlier or the same stage). */
+  async function mergeBaseStage(ctx, st) {
+    if (!st || !mergesState(st.stage)) return null;
+    const loaded = await readLoaded(targetOfCtx(ctx).id);
+    if (!loaded || loaded.scenario !== ctx.scenario || loaded.anchor !== ctx.anchor || !hasStage(loaded.stage)) return null;
+    return loaded.stage <= st.stage ? loaded.stage : null;
   }
   async function checkStageOrder(ctx) {
     const problem = await stageOrderProblem(ctx);
@@ -153,6 +202,7 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
     const def = scenarios(ctx.scenario);
     const anchor = ctx.anchor;
     const st = stageOf(def, ctx.stage ?? null);
+    const t = targetOfCtx(ctx);
     if (!ctx.chain) await checkStageOrder(ctx);
     const targets = await targetsFor(ctx, { allowFallback: ctx.dryRun });
     let salt;
@@ -170,15 +220,20 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
     const fingerprint = scenarioFingerprint(def, { seed: SEED, anchor, stage: st?.stage ?? null });
     ctx.emit({
       type: 'note',
-      message: st
-        ? `Generating 60 days of activity before ${anchor}: stage ${st.stage} of ${st.count} (case${st.stage > 1 ? `s 1 to ${st.stage}` : ' 1'}).`
-        : `Generating 60 days of activity before ${anchor}.`,
+      message: !st
+        ? `Generating 60 days of activity before ${anchor} for ${t.label}.`
+        : st.history
+          ? `Generating the history for ${t.label}: days 60 to 30 before ${anchor}, and nothing after them (stage 0, loaded before onboarding).`
+          : `Generating 60 days of activity before ${anchor} for ${t.label}: stage ${st.stage} of ${st.count} (case${st.stage > 1 ? `s 1 to ${st.stage}` : ' 1'}).`,
     });
-    const dataDir = dataDirFor(ctx.dryRun);
-    const outDir = outDirFor(ctx.dryRun);
+    const dataDir = dataDirFor(ctx.dryRun, t.id);
+    const outDir = outDirFor(ctx.dryRun, t.id);
+    // a later stage merges into the live state: its base is the stage the target holds now
+    // (recomputed from the same generation by the worker, written to <out>/merge-base/)
+    const baseStage = await mergeBaseStage(ctx, st);
     const out = await runWorker({
       options: { scenario: def.id, stage: st?.stage ?? null, anchor, salt, seed: SEED, distributionId: targets.distributionId, distributionDomain: targets.distributionDomain },
-      dataDir, outDir,
+      dataDir, outDir, baseStage,
     });
     const paceMs = Math.max(0, Math.min(MAX_PACE_MS, ctx.paceMs ?? DEFAULT_PACE_MS));
     const max = (key) => Math.max(0, ...out.stats.daily.map((d) => d[key] ?? 0));
@@ -197,18 +252,19 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
       if (perDay > 0) await sleep(perDay);
     }
     const record = {
-      scenario: def.id, stage: st?.stage ?? null, stages: st?.count ?? null, anchor, seed: SEED, fingerprint, at: now().toISOString(), dryRun: !!ctx.dryRun,
-      distributionId: targets.distributionId, elapsedMs: out.elapsedMs, counts: out.counts, dataDir, outDir,
+      target: t.id, scenario: def.id, stage: st?.stage ?? null, stages: st?.count ?? null, anchor, seed: SEED, fingerprint, at: now().toISOString(), dryRun: !!ctx.dryRun,
+      distributionId: targets.distributionId, elapsedMs: out.elapsedMs, counts: out.counts, dataDir, outDir, baseStage,
     };
-    await writeJson(stateFile(ctx.dryRun, 'generated.json'), record);
-    await writeJson(stateFile(ctx.dryRun, 'last-run.json'), { ...record, daily: out.stats.daily, feed: out.feed });
-    return { scenario: def.id, stage: st?.stage ?? null, anchor, fingerprint, elapsedMs: out.elapsedMs, counts: out.counts };
+    await writeJson(stateFile(ctx.dryRun, 'generated.json', t.id), record);
+    await writeJson(stateFile(ctx.dryRun, 'last-run.json', t.id), { ...record, daily: out.stats.daily, feed: out.feed });
+    return { target: t.id, scenario: def.id, stage: st?.stage ?? null, anchor, fingerprint, elapsedMs: out.elapsedMs, counts: out.counts };
   }
 
   // ------------------------------------------------------------------ upload
   async function upload(ctx) {
-    const generated = await readJson(stateFile(ctx.dryRun, 'generated.json'));
-    if (!generated) throw new ActionError(ctx.dryRun ? 'nothing generated in dry-run mode yet: run Generate first' : 'nothing generated yet: run Generate first');
+    const t = targetOfCtx(ctx);
+    const generated = await readJson(stateFile(ctx.dryRun, 'generated.json', t.id));
+    if (!generated) throw new ActionError(ctx.dryRun ? `nothing generated in dry-run mode for ${t.label} yet: run Generate first` : `nothing generated for ${t.label} yet: run Generate first`);
     const targets = await targetsFor(ctx, { allowFallback: ctx.dryRun });
     if (!ctx.dryRun) {
       const manifest = await readJson(path.join(generated.outDir, 'manifest.json'));
@@ -220,13 +276,27 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
       if (salt !== manifest.salt) throw new ActionError(`the logs were generated with a different salt than ${targets.saltSecret}; run Generate again`);
     }
     const sets = await uploadSets({ targets, dataDir: generated.dataDir, outDir: generated.outDir });
-    const totals = { state: sets.state.length, appLogs: sets.appLogs.length, cloudfront: sets.cloudfront.length };
+    // Stage 0 and a single load replace the state; a later stage merges into the live state
+    const merge = mergesState(generated.stage);
+    if (merge && !ctx.dryRun) {
+      const loaded = await readLoaded(t.id);
+      if ((loaded?.stage ?? null) !== (generated.baseStage ?? null) || (loaded && (loaded.scenario !== generated.scenario || loaded.anchor !== generated.anchor))) {
+        throw new ActionError(`what is loaded on ${t.label} changed since this stage was generated; run Generate again (or Load) so the merge starts from what the app holds now`);
+      }
+    }
+    const totals = { state: merge ? 0 : sets.state.length, appLogs: sets.appLogs.length, cloudfront: sets.cloudfront.length };
     const destinations = {
       state: `s3://${targets.stateBucket}/${STATE_PREFIX}`,
       appLogs: `s3://${targets.appLogsBucket}/${APP_LOGS_PREFIX}`,
       cloudfront: `s3://${targets.accessLogsBucket}/${targets.cloudfrontPrefix}`,
     };
-    ctx.emit({ type: 'upload-plan', totals, destinations });
+    ctx.emit({ type: 'upload-plan', totals, destinations, stateMode: merge ? 'merge' : 'replace' });
+    let mergeResults = null;
+    if (merge) {
+      mergeResults = await mergeIntoLive(ctx, { targets, sets, generated });
+      totals.state = mergeResults ? mergeResults.filter((r) => r.wouldWrite).length : 0;
+    }
+    const logSets = merge ? { ...sets, state: [] } : sets;
     let lastEmit = 0;
     const onProgress = (target, done, total) => {
       if (done === total || done - lastEmit >= 100 || done < lastEmit) {
@@ -237,26 +307,71 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
     let counts;
     if (ctx.dryRun) {
       counts = {};
-      for (const [target, items] of Object.entries(sets)) {
+      for (const [target, items] of Object.entries(logSets)) {
+        if (merge && target === 'state') continue;
         for (let i = 100; i < items.length; i += 100) { onProgress(target, i, items.length); await sleep(5); }
         onProgress(target, items.length, items.length);
         counts[target] = items.length;
       }
       ctx.emit({ type: 'note', message: 'Dry run: nothing was uploaded; the counts are what an upload would send.' });
     } else {
-      counts = await uploadObjects({ targets, sets, put: aws.put, onProgress });
-      await writeJson(stateFile(false, 'loaded.json'), {
+      counts = await uploadObjects({ targets, sets: logSets, put: aws.put, onProgress });
+      if (merge) counts.state = mergeResults.filter((r) => r.written).length;
+      await writeLoaded(t.id, {
+        target: t.id, stack: t.stack,
         scenario: generated.scenario, stage: generated.stage ?? null, stages: generated.stages ?? null,
         anchor: generated.anchor, seed: generated.seed, fingerprint: generated.fingerprint,
         at: now().toISOString(), by: ctx.chain ? 'load' : 'upload', counts, published: null,
+        state: merge ? { mode: 'merged', base: generated.baseStage ?? null, ...mergeSummary(mergeResults) } : { mode: 'replaced' },
       });
     }
-    return { counts, destinations, dryRun: !!ctx.dryRun };
+    if (merge && ctx.dryRun) counts.state = 0;
+    return { counts, destinations, dryRun: !!ctx.dryRun, stateMode: merge ? 'merge' : 'replace', merge: mergeResults ? mergeSummary(mergeResults) : null };
+  }
+
+  /** Totals of a merge across domains, and the domains it would write. */
+  function mergeSummary(results) {
+    const sum = {};
+    for (const r of results) for (const [k, v] of Object.entries(mergeTotals(r))) if (k !== 'live' && k !== 'stage') sum[k] = (sum[k] ?? 0) + v;
+    return { ...sum, documentsWritten: results.filter((r) => r.written).length, domainsChanged: results.filter((r) => r.wouldWrite).map((r) => r.domain) };
+  }
+
+  /**
+   * Read the live state documents and merge the stage into them (src/merge.js). A real
+   * upload writes the documents the stage adds to; a dry run reads and reports only. With
+   * placeholder outputs (a dry run without the stack) there is nothing to read.
+   */
+  async function mergeIntoLive(ctx, { targets, sets, generated }) {
+    const a = layers(ctx.dryRun).aws;
+    if (targets.placeholder) {
+      ctx.emit({ type: 'note', message: 'Dry run: the live state could not be read (no stack outputs), so the merge is not shown. A real load reads it first and only adds to it.' });
+      return null;
+    }
+    const base = generated.baseStage !== null && generated.baseStage !== undefined ? await readStateDir(path.join(generated.outDir, 'merge-base')) : null;
+    ctx.emit({
+      type: 'note',
+      message: `Stage ${generated.stage} adds to the live state in s3://${targets.stateBucket}/${STATE_PREFIX} instead of replacing it: every record the app, an AI agent or you wrote since the last load is kept, and only the records this stage introduces are added${base ? ` (compared with ${stageWords(generated.baseStage)}, the stage loaded before)` : ' (no earlier stage of this scenario is recorded as loaded, so nothing counts as removed in the app)'}.`,
+    });
+    const results = await uploadState({
+      targets, stage: stateDocuments(sets.state), base, getObject: a.getObject, put: a.put, write: !ctx.dryRun,
+      onDomain: (r) => ctx.emit({ type: 'merge', domain: r.domain, mode: r.mode, written: r.written, wouldWrite: r.wouldWrite, totals: mergeTotals(r), samples: r.samples, sentence: mergeSentence(r) }),
+    });
+    const sum = mergeSummary(results);
+    const kept = `${sum.keptAppOnly ?? 0} record(s) written by the app since the last load kept`;
+    const notOverwritten = (sum.conflicts ?? 0) ? `, ${sum.conflicts} record(s) the app holds differently left as the app has them` : '';
+    ctx.emit({
+      type: 'note',
+      message: ctx.dryRun
+        ? `Dry run: the merge would add ${sum.added ?? 0} record(s) to ${sum.domainsChanged.length} document(s) (${sum.domainsChanged.join(', ') || 'none'}); ${kept}${notOverwritten}. Nothing was written.`
+        : `Merged: ${sum.added ?? 0} record(s) added to ${sum.documentsWritten} document(s) (${sum.domainsChanged.join(', ') || 'none'}); ${kept}${notOverwritten}.`,
+    });
+    return results;
   }
 
   // ------------------------------------------------------------------ verify
   async function verify(ctx) {
-    const generated = await readJson(stateFile(ctx.dryRun, 'generated.json'));
+    const t = targetOfCtx(ctx);
+    const generated = await readJson(stateFile(ctx.dryRun, 'generated.json', t.id));
     const rng = createRng(Date.now(), 'verify');
     let summary;
     let sampleKey;
@@ -319,7 +434,9 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
   // ------------------------------------------------------------------ publish
   async function publish(ctx) {
     const g = layers(ctx.dryRun).git;
-    const generated = await readJson(stateFile(ctx.dryRun, 'generated.json'));
+    const t = targetOfCtx(ctx);
+    if (!t.publish) throw new ActionError(`refusing to publish: publishing the starting state to LearnLoop's main is offered for Production only, not ${t.label}`);
+    const generated = await readJson(stateFile(ctx.dryRun, 'generated.json', t.id));
     if (!generated) throw new ActionError('nothing generated yet: run Generate first');
     const branch = await g.branch();
     if (branch !== 'main') throw new ActionError(`refusing to publish: the LearnLoop repository is on branch '${branch}', not main`);
@@ -361,8 +478,8 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
     return { commit: head, files: staged };
 
     async function markPublished(info) {
-      const loaded = await readJson(stateFile(false, 'loaded.json'));
-      if (loaded && loaded.fingerprint === generated.fingerprint) await writeJson(stateFile(false, 'loaded.json'), { ...loaded, published: { ...info, at: now().toISOString() } });
+      const loaded = await readLoaded(t.id);
+      if (loaded && loaded.fingerprint === generated.fingerprint) await writeLoaded(t.id, { ...loaded, published: { ...info, at: now().toISOString() } });
     }
   }
 
@@ -372,14 +489,20 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
   async function load(ctx) {
     const def = scenarios(ctx.scenario);
     const st = stageOf(def, ctx.stage ?? null);
+    const t = targetOfCtx(ctx);
     await checkStageOrder(ctx);
-    const doPublish = ctx.publish ?? publishByDefault(st);
+    const doPublish = t.publish && (ctx.publish ?? publishByDefault(st));
     const results = {};
     for (const [name, fn] of [['clear', clear], ['generate', generate], ['upload', upload], ['verify', verify], ['publish', publish]]) {
       if (name === 'publish' && !doPublish) {
         ctx.emit({ type: 'step', step: name, status: 'skipped' });
-        ctx.emit({ type: 'note', message: `Publishing the starting state was left out for stage ${st.stage} of ${st.count}. LearnLoop already reads this stage's starting state from AWS (Upload wrote it); main and LearnLoop's deploy stay as they are until the last stage.` });
-        results[name] = { skipped: true, reason: 'not_requested' };
+        ctx.emit({
+          type: 'note',
+          message: !t.publish
+            ? `Publishing to LearnLoop's main is offered for Production only; ${t.label} reads this load's state from its own state bucket.`
+            : `Publishing the starting state was left out for ${stageWords(st.stage)} of ${st.count}. LearnLoop already reads this stage's starting state from AWS (Upload wrote it); main and LearnLoop's deploy stay as they are until the last stage.`,
+        });
+        results[name] = { skipped: true, reason: t.publish ? 'not_requested' : 'not_offered_for_target' };
         continue;
       }
       ctx.emit({ type: 'step', step: name, status: 'started' });
@@ -389,7 +512,19 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
     return results;
   }
 
-  return { clear, generate, upload, verify, publish, load };
+  /** What the page reads for one target: its loaded record and its generated records. */
+  async function stateFor(target = DEFAULT_TARGET) {
+    const t = targetOf(target);
+    return {
+      target: t.id,
+      loaded: await readLoaded(t.id),
+      generated: await readJson(stateFile(false, 'generated.json', t.id)),
+      dryRunGenerated: await readJson(stateFile(true, 'generated.json', t.id)),
+      lastRun: () => readJson(stateFile(false, 'last-run.json', t.id)),
+    };
+  }
+
+  return { clear, generate, upload, verify, publish, load, stateFor, targetsFor };
 }
 
 /**
@@ -403,17 +538,21 @@ export function publishByDefault(st) {
   return !st || st.final;
 }
 
+/** The targets as the page lists them. */
+export const TARGET_CHOICES = Object.freeze(Object.values(TARGETS).map(({ id, label, stack, publish }) => ({ id, label, stack, publish })));
+
 /** What the confirmation says for a staged load, by whether it publishes, and for starting over. */
 export const STAGED_LOAD_WORDING = Object.freeze({
   publish: "Clear the two log prefixes, generate this stage, upload and verify it, then commit and push data/seed/ to LearnLoop's main branch (which starts LearnLoop's deploy).",
-  noPublish: "Clear the two log prefixes, generate this stage, upload and verify it. Nothing is committed or pushed to LearnLoop.",
-  startOver: 'Load stage 1 again. The Governance Agent keeps the highest number of people it has read for every period, so an application that has already read a later stage would never show the drops again: after this, remove the LearnLoop application in the Governance Agent and onboard it again.',
+  noPublish: "Clear the two log prefixes, generate this stage, upload and verify it. The app's live state is kept and only this stage's new records are added. Nothing is committed or pushed to LearnLoop.",
+  history: "Clear the two log prefixes, generate the history (days 60 to 30 before the start date, nothing after them), upload it with the app's starting state, which replaces the live state, and verify it. Nothing is committed or pushed to LearnLoop.",
+  startOver: "Load the history (stage 0) again, with today's date. This replaces the app's live state, including what the AI agents wrote. The Governance Agent keeps the highest number of people it has read for every period, so an application that has already read a later stage would never show the drops again: after this, remove the LearnLoop application in the Governance Agent and onboard it again.",
 });
 
 /** Which actions change something outside this machine, and so need a confirmation token. */
 export const CONFIRMED_ACTIONS = Object.freeze({
   clear: 'Delete every object under the two log prefixes in the LearnLoop buckets (including any real log files written since the last load).',
-  upload: "Overwrite the LearnLoop app's state documents and add the generated log files in your AWS account.",
+  upload: "Write the LearnLoop app's state documents (a single load and the history replace them; a later stage adds to the live state) and add the generated log files in your AWS account.",
   publish: "Commit data/seed/ on LearnLoop's main branch and push it. Pushing to main also starts LearnLoop's production deploy.",
   load: "Clear the two log prefixes, generate, upload, verify, then commit and push data/seed/ to LearnLoop's main branch (which starts LearnLoop's deploy).",
 });

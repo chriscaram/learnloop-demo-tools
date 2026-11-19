@@ -4,12 +4,15 @@
   "private": true,
   "type": "module",
   "description": "Generator for LearnLoop mock data and historical logs",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "seed": "node src/cli.js",
     "seed:upload": "node src/upload.js",
     "simulator": "node src/simulator/server.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "cloud": "node infra/scripts/cloud.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-cloudformation": "^3.700.0",

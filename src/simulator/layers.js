@@ -88,3 +88,9 @@ export function createGitLayer(repo) {
     head: async () => (await git('rev-parse', '--short', 'HEAD')).trim(),
   };
 }
+
+/** The cloud simulator's git layer: it never publishes, so every call says so instead of running git. */
+export function noGitLayer() {
+  const refuse = async () => { throw new Error("git is not available in the simulator deployed in AWS: publish from the local simulator"); };
+  return { writes: false, repo: null, branch: refuse, status: refuse, add: refuse, stagedChanged: refuse, commit: refuse, push: refuse, head: refuse };
+}

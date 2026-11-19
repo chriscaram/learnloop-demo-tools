@@ -1,0 +1,16 @@
+{
+  "name": "learnloop-demo-simulator-infra",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The Activity Simulator in AWS: CloudFront (password) -> VPC origin -> internal ALB -> one Fargate task, built by CodeBuild",
+  "scripts": {
+    "cdk": "cdk",
+    "synth": "cdk synth"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.1000.0",
+    "aws-cdk-lib": "^2.200.0",
+    "constructs": "^10.4.2"
+  }
+}

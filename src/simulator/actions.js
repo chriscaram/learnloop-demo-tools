@@ -77,14 +77,15 @@ export function summariseKeys(keys) {
   return { objects: keys.length, firstDay: days[0] ?? null, lastDay: days.at(-1) ?? null, days: new Set(days).size };
 }
 
-export function createActions({ aws, git, paths, scenarios = getScenario, now = () => new Date(), workerUrl = new URL('./generate-worker.js', import.meta.url), env = process.env }) {
+export function createActions({ aws, git, paths, scenarios = getScenario, now = () => new Date(), workerUrl = new URL('./generate-worker.js', import.meta.url), env = process.env, publishOff = false }) {
   // Production keeps the folders it always had; another target has its own subfolder.
   const targetDir = (dryRun, target = DEFAULT_TARGET) => path.join(paths.stateDir, ...(dryRun ? ['dry-run'] : []), ...(target === DEFAULT_TARGET ? [] : [target]));
   const stateFile = (dryRun, name, target = DEFAULT_TARGET) => path.join(targetDir(dryRun, target), name);
   const dataDirFor = (dryRun, target = DEFAULT_TARGET) => (!dryRun && target === DEFAULT_TARGET ? paths.dataDir : path.join(targetDir(dryRun, target), 'seed'));
   const outDirFor = (dryRun, target = DEFAULT_TARGET) => (!dryRun && target === DEFAULT_TARGET ? paths.outDir : path.join(targetDir(dryRun, target), 'out'));
   const layers = (dryRun) => ({ aws: dryRun ? readOnly(aws, 'aws') : aws, git: dryRun ? readOnly(git, 'git') : git });
-  const targetOfCtx = (ctx) => targetOf(ctx.target ?? DEFAULT_TARGET);
+  // publishOff (the simulator running in AWS): no target publishes, whatever TARGETS says
+  const targetOfCtx = (ctx) => withPublish(targetOf(ctx.target ?? DEFAULT_TARGET), publishOff);
   const loadedFile = path.join(paths.stateDir, 'loaded.json');
   async function readLoaded(target) {
     return loadedByTarget(await readJson(loadedFile))[target] ?? null;
@@ -435,6 +436,7 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
   async function publish(ctx) {
     const g = layers(ctx.dryRun).git;
     const t = targetOfCtx(ctx);
+    if (t.publishOff) throw new ActionError(`refusing to publish: ${PUBLISH_OFF_WORDING}`);
     if (!t.publish) throw new ActionError(`refusing to publish: publishing the starting state to LearnLoop's main is offered for Production only, not ${t.label}`);
     const generated = await readJson(stateFile(ctx.dryRun, 'generated.json', t.id));
     if (!generated) throw new ActionError('nothing generated yet: run Generate first');
@@ -498,11 +500,12 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
         ctx.emit({ type: 'step', step: name, status: 'skipped' });
         ctx.emit({
           type: 'note',
-          message: !t.publish
+          message: t.publishOff ? `${PUBLISH_OFF_WORDING} ${t.label} reads this load's state from its state bucket.`
+            : !t.publish
             ? `Publishing to LearnLoop's main is offered for Production only; ${t.label} reads this load's state from its own state bucket.`
             : `Publishing the starting state was left out for ${stageWords(st.stage)} of ${st.count}. LearnLoop already reads this stage's starting state from AWS (Upload wrote it); main and LearnLoop's deploy stay as they are until the last stage.`,
         });
-        results[name] = { skipped: true, reason: t.publish ? 'not_requested' : 'not_offered_for_target' };
+        results[name] = { skipped: true, reason: t.publishOff ? 'publish_off' : t.publish ? 'not_requested' : 'not_offered_for_target' };
         continue;
       }
       ctx.emit({ type: 'step', step: name, status: 'started' });
@@ -540,6 +543,18 @@ export function publishByDefault(st) {
 
 /** The targets as the page lists them. */
 export const TARGET_CHOICES = Object.freeze(Object.values(TARGETS).map(({ id, label, stack, publish }) => ({ id, label, stack, publish })));
+
+/**
+ * The simulator deployed in AWS (SIMULATOR_PUBLISH=off) never publishes: pushing to
+ * LearnLoop's main starts its production deploy, and no credential that can do that is
+ * kept in the account. Publishing stays with the local simulator.
+ */
+export const PUBLISH_OFF_WORDING = "Publishing the starting state to LearnLoop's main is done from the local simulator only; this one runs in AWS and holds no git credential.";
+
+/** A target with publishing turned off when `publishOff` (the cloud simulator); unchanged otherwise. */
+export function withPublish(target, publishOff) {
+  return publishOff ? { ...target, publish: false, publishOff: true } : target;
+}
 
 /** What the confirmation says for a staged load, by whether it publishes, and for starting over. */
 export const STAGED_LOAD_WORDING = Object.freeze({

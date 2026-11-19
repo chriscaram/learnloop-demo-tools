@@ -23,6 +23,7 @@ src/upload.js      npm run seed:upload (and the upload sets the simulator shares
 src/merge.js       how a later stage adds to the live app state: per domain, by record key, never overwriting (pure)
 src/stack.js       the two targets (Production = LearnLoopProd, Staging = LearnLoopStaging) and their stack outputs
 src/simulator/     npm run simulator: node:http server, SSE progress, actions, AWS and git layers, log-line sentences
+infra/             the simulator in AWS (npm run cloud): CDK stack, CloudFront password function, deploy/start/stop script; Dockerfile at the root
 simulator/         the page: index.html, app.js, styles.css (no libraries, no CDN)
 test/              generator, scenario, staged-reveal, merge and simulator checks, contract checks against ../LearnLoop,
                    and the staged reveal run through the Governance Agent's own detectors (../governance-agent)
@@ -46,7 +47,7 @@ npm run seed:upload                              # LearnLoopProd
 npm run seed:upload -- --stack LearnLoopStaging  # the staging deployment (generate with its own salt, the learnloop/staging/ secret)
 ```
 
-`--scenario` defaults to `lapsed-learners`; see [Scenarios](#scenarios). `--stage <n>` generates one stage of a staged scenario (`q4-three-signals`: stage 0, the history, then stages 1 to 3; see [Presenting the staged reveal](#presenting-the-staged-reveal)); without it, or with the last stage, the output is the whole scenario. The simulator page does all of this without a terminal: see [The Activity Simulator](#the-activity-simulator).
+`--scenario` defaults to `lapsed-learners`; see [Scenarios](#scenarios). `--stage <n>` generates one stage of a staged scenario (`q4-three-signals`: stage 0, the history, then stages 1 to 3; see [Presenting the staged reveal](#presenting-the-staged-reveal)); without it, or with the last stage, the output is the whole scenario. The simulator page does all of this without a terminal: see [The Activity Simulator](#the-telemetry-activity-simulator).
 
 `npm run seed` is deterministic: the same arguments produce byte-identical output. It writes:
 
@@ -230,7 +231,7 @@ Rules that keep it working:
 - **One business review per scenario.** `business-docs/<scenario-id>.md` is the quarterly review to upload in the demo (the simulator's "Download the business review for this scenario" button serves it as `learnloop-q4-2026-business-review.md`, a name that does not give the scenario away). `lapsed-learners.md` is a copy of LearnLoop's `docs/business/q4-2026-business-review.md`; `abandoned-carts.md` states the goal its finding links to; `q4-three-signals.md` states the three goals of its three cases; `steady-state.md`, `slow-lessons.md` and `outage-drop.md` are neutral: their own figures, no claim about speed or outages, and all four goals. The figures are for a start date of 15 November 2026.
 - **Late November.** The agent's calendar lists Black Friday / Cyber Monday (24 Nov – 2 Dec); with a start date in that range the market explanation cannot be ruled out, which lowers confidence but does not withdraw a finding.
 
-## The Activity Simulator
+## The Telemetry Activity Simulator
 
 A local page for a live demo in front of a non-technical audience: the presenter picks a scenario (each card shows only its title and a description for the audience; the expected finding and the parameters stay sealed until the envelope is opened), downloads its business review, the page shows a sealed fingerprint of what the simulator is told, generates the activity day by day, shows where it lands in AWS, reads it back, and at the end opens the envelope and checks that the fingerprint still matches. No terminal, AWS console or file is needed during the demo.
 
@@ -258,6 +259,19 @@ Actions (each streamed to the page as Server-Sent Events, one at a time; a secon
 | Start over | Load the history again (today's date), replacing the app's state. The confirmation says that the Governance Agent application must then be removed and onboarded again. | yes |
 
 The commit message names the scenario by its sealed fingerprint (`Seed: load sealed scenario <first 12 hex> anchored on <date>`), not by its id: the agent reads the LearnLoop repository, and a commit titled `lapsed-learners` would tell it the answer. Set `SIMULATOR_COMMIT_SCENARIO_NAME=1` to put the id in the subject instead. The message ends with the `Co-Authored-By` line.
+
+**Running it in AWS, from a browser.** The same simulator can run in the account, behind CloudFront and a password, so the presenter needs no terminal and no local credentials during the demo (`infra/`, stack `TelemetryActivitySimulator`, deployed from this repository only and tagged `Application=telemetry-activity-simulator`, never with LearnLoop's tag, so the Governance Agent neither reads nor scans it):
+
+```bash
+cd infra && npm ci && cd ..
+npm run cloud -- deploy      # reads LearnLoopProd/LearnLoopStaging, creates the password, cdk deploy, builds the image in CodeBuild
+npm run cloud -- start       # one Fargate task, about two minutes; prints the address
+npm run cloud -- password    # the address, user `presenter` and the password (Secrets Manager telemetry-activity-simulator/password)
+npm run cloud -- stop        # after the demo: nothing runs
+npm run cloud -- status
+```
+
+CloudFront asks for the password before anything reaches the server (a CloudFront Function that holds only the SHA-256 of the expected header; `deploy --rotate-password` changes it). The load balancer is internal and reachable only through CloudFront's VPC origin; the task's role reads the LearnLoop stacks' outputs and pseudonym salts and reads, writes and deletes in their three buckets each, nothing else. `state/`, `out/` and the seed folder live on EFS, so a restart keeps which stage is loaded where. Differences from the local simulator: **Publish the starting state is not offered** (the page says so; publish from the local simulator, since a push to LearnLoop's main starts its production deploy and no git credential is kept in AWS), and the Production load generates the seed files into EFS instead of `../LearnLoop/data/seed`. A `deploy` sets the service back to 0 tasks and starts it again if it was running. Cost: the load balancer (about $16–18 a month) plus a few cents per hour while a task runs.
 
 **Rehearsal (dry run).** The toggle on the page (or `"dryRun": true`) runs the same steps with every write removed: the AWS and git layers' write methods are replaced by functions that throw. Clear lists what it would delete, Generate writes into `state/dry-run/` instead of LearnLoop, Upload counts what it would send and, for a later stage, reads the live state and shows what the merge would add, keep and leave alone, Verify reads the rehearsal folder back, Publish compares the files and says whether it would commit. Read-only calls (stack outputs, the salt, listings, the live state documents) still use your credentials; without them a rehearsal falls back to placeholders and says so.
 

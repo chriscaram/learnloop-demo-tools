@@ -1,0 +1,8 @@
+# Mirrors the CodeBuild source asset's exclusions (infra/lib/simulator-stack.mjs).
+.git
+node_modules
+out
+state
+infra
+test
+docs

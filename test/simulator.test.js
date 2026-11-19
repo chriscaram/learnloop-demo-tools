@@ -112,7 +112,8 @@ const post = (p, body) => fetch(`${base}${p}`, { method: 'POST', headers: { 'con
 const token = async (action) => (await (await post('/api/confirm', { action })).json()).token;
 async function events(runId) {
   const text = await (await fetch(`${base}/api/runs/${runId}/events`)).text();
-  return text.split('\n\n').filter(Boolean).map((chunk) => JSON.parse(chunk.replace(/^data: /, '')));
+  // comment lines (`: keep-alive`, the heartbeat) are not events
+  return text.split('\n\n').filter((chunk) => chunk.startsWith('data: ')).map((chunk) => JSON.parse(chunk.replace(/^data: /, '')));
 }
 const writesIn = (calls) => calls.filter(([name]) => WRITES.includes(name));
 
@@ -507,4 +508,61 @@ test('targets: Staging has its own stack, salt, buckets and stage record; a miss
   assert.equal(state.loaded.stack, 'LearnLoopStaging');
   assert.equal((await (await fetch(`${base}/api/state`)).json()).loaded.stack, 'LearnLoopProd');
   assert.equal((await fetch(`${base}/api/state?target=qa`)).status, 400);
+});
+
+test('deployed in AWS: answers its CloudFront host, the health check and nothing else; never publishes; keeps the event stream alive', async () => {
+  const { request } = await import('node:http');
+  const cloudRoot = await mkdtemp(path.join(tmpdir(), 'll-sim-cloud-'));
+  const cloudPaths = { stateDir: path.join(cloudRoot, 'state'), dataDir: path.join(cloudRoot, 'seed'), outDir: path.join(cloudRoot, 'out') };
+  const cloudAws = fakeAws();
+  const { noGitLayer } = await import('../src/simulator/layers.js');
+  const publicHost = 'd1simulator.cloudfront.net';
+  let port = 0;
+  const sim = createSimulator({ aws: cloudAws, git: noGitLayer(), paths: cloudPaths, port: () => port, publicHost, publishOff: true, heartbeatMs: 20 });
+  const srv = createServer(sim.handler);
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+  port = srv.address().port;
+  const at = `http://127.0.0.1:${port}`;
+  const raw = (p, { host, method = 'GET', headers = {}, body } = {}) => new Promise((resolve, reject) => {
+    const req = request(`${at}${p}`, { method, headers: { host, ...headers } }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+  try {
+    assert.deepEqual(await raw('/healthz', { host: '10.0.1.23:8790' }), { status: 200, text: 'ok' }, 'the health check names the task address and learns only ok');
+    assert.equal((await raw('/api/scenarios', { host: publicHost })).status, 200);
+    assert.equal((await raw('/api/scenarios', { host: `127.0.0.1:${port}` })).status, 200, 'localhost still answers');
+    assert.equal((await raw('/api/scenarios', { host: '10.0.1.23:8790' })).status, 421, 'the task address is not a host it answers');
+    assert.equal((await raw('/api/scenarios', { host: 'attacker.example' })).status, 421);
+    const confirm = (origin) => raw('/api/confirm', { host: publicHost, method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{"action":"load"}' });
+    assert.equal((await confirm(`https://${publicHost}`)).status, 200);
+    assert.equal((await confirm(`http://${publicHost}`)).status, 403, 'only the https origin');
+    assert.equal((await confirm('https://attacker.example')).status, 403);
+
+    const cards = JSON.parse((await raw('/api/scenarios', { host: publicHost })).text);
+    assert.ok(cards.targets.every((t) => t.publish === false && t.publishOff === true), 'no target publishes');
+    assert.match(cards.publishOff, /local simulator only/);
+    const tok = JSON.parse((await confirm(`https://${publicHost}`)).text).token;
+    const refused = await raw('/api/actions/load', { host: publicHost, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scenario: 'q4-three-signals', stage: 0, anchor: '2026-11-15', publish: true, token: tok }) });
+    assert.equal(refused.status, 400);
+    assert.match(JSON.parse(refused.text).error, /local simulator only/);
+
+    const tok2 = JSON.parse((await confirm(`https://${publicHost}`)).text).token;
+    const started = await raw('/api/actions/load', { host: publicHost, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scenario: 'steady-state', anchor: '2026-11-15', dryRun: true, pace: 'fast', token: tok2 }) });
+    assert.equal(started.status, 202, started.text);
+    const stream = (await raw(`/api/runs/${JSON.parse(started.text).runId}/events`, { host: publicHost })).text;
+    assert.match(stream, /^: keep-alive$/m, 'a heartbeat between events');
+    const list = stream.split('\n\n').filter((c) => c.startsWith('data: ')).map((c) => JSON.parse(c.slice(6)));
+    assert.equal(list.at(-1).type, 'done', JSON.stringify(list.filter((e) => e.type === 'error')));
+    assert.ok(list.some((e) => e.type === 'step' && e.step === 'publish' && e.status === 'skipped'));
+    assert.equal(list.at(-1).result.publish.reason, 'publish_off');
+    assert.equal(writesIn(cloudAws.calls).length, 0);
+  } finally {
+    srv.close();
+    await rm(cloudRoot, { recursive: true, force: true });
+  }
 });

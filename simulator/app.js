@@ -1,4 +1,4 @@
-// LearnLoop Activity Simulator — the page. No libraries: fetch, EventSource, hand-drawn SVG.
+// Telemetry Activity Simulator — the page. No libraries: fetch, EventSource, hand-drawn SVG.
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 const fmt = (n) => (n === null || n === undefined ? '—' : Number(n).toLocaleString('en-US'));
@@ -177,7 +177,8 @@ async function refreshLoaded({ readBack = false } = {}) {
         document.createTextNode(`${where} · loaded now: `), el('strong', { text: title }),
         ...(stageText ? [el('strong', { class: 'loaded-stage', text: stageText })] : []),
         document.createTextNode(` · start date ${l.anchor} · loaded ${longTime(l.at)} by “${ACTION_LABELS[l.by] ?? l.by}”${stateText} · `),
-        document.createTextNode(!target().publish ? 'publishing to LearnLoop main is for Production only'
+        document.createTextNode(ui.publishOff ? 'publishing to LearnLoop main is done from the local simulator'
+          : !target().publish ? 'publishing to LearnLoop main is for Production only'
           : l.published ? (l.published.skipped ? 'starting state already on LearnLoop main' : `starting state published ${longTime(l.published.at)} (${l.published.commit})`) : 'starting state not published yet'),
       );
     }
@@ -611,8 +612,11 @@ async function init() {
   $('#open-envelope').addEventListener('click', openEnvelope);
   $('#anchor').addEventListener('change', updateFingerprint);
   $('#dry-run').addEventListener('change', () => { $('#dry-indicator').hidden = !dryRun(); renderCards(); renderStageControls(); updateFingerprint(); });
-  const { scenarios, defaultAnchor, seed, confirmations, stagedLoad, targets, defaultTarget } = await api('/api/scenarios');
+  const { scenarios, defaultAnchor, seed, confirmations, stagedLoad, targets, defaultTarget, publishOff } = await api('/api/scenarios');
   ui.targets = targets ?? [];
+  // the simulator deployed in AWS never publishes; the server says why, once
+  ui.publishOff = publishOff ?? null;
+  if (ui.publishOff) $('#publish-production-only').textContent = ui.publishOff;
   const saved = localStorage.getItem('target');
   ui.target = ui.targets.some((t) => t.id === saved) ? saved : defaultTarget ?? 'production';
   renderTargets();

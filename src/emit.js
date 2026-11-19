@@ -70,7 +70,7 @@ const hourKey = (ms) => {
  * out, system events included, and the hours from `fromMs` on get no CloudFront object at all
  * (unmeasured, not observed empty); every object before `fromMs` is still byte for byte the same.
  */
-export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, environment = 'prod', withhold = null }) {
+export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, environment = 'prod', withhold = null, onProgress = null }) {
   const rng = createRng(seed, 'emit');
   const userPseudo = new Map();
   const sessionPseudo = new Map();
@@ -106,7 +106,12 @@ export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, 
   const cfLines = new Map(); // hourKey -> [ [ms, line] ]
   const host = distributionDomain;
 
+  // progress only (the simulator page), about every 5% of the requests; it draws nothing
+  const step = Math.max(1, Math.ceil(sim.requests.length / 20));
+  let seen = 0;
   for (const req of sim.requests) {
+    if (onProgress && seen % step === 0) onProgress(seen, sim.requests.length);
+    seen += 1;
     const held = !!withhold && (withhold.all === true || (req.kind === 'api' && withhold.routes.has(`${req.method} ${req.route}`))
       || (req.activity !== undefined && withhold.activities?.has(req.activity)));
     const kept = (ms) => !held || ms < withhold.fromMs;
@@ -211,6 +216,7 @@ export function emitLogs(sim, { salt, seed, distributionId, distributionDomain, 
     appLogs.set(`app-logs/service=${service}/dt=${date}/${service}-${date}-${hour.slice(11)}.log`, `${lines.join('\n')}\n`);
   }
 
+  onProgress?.(sim.requests.length, sim.requests.length);
   const cloudfront = new Map();
   for (const key of [...cfLines.keys()].sort()) {
     const lines = cfLines.get(key).sort((a, b) => a[0] - b[0]).map(([, line]) => line);

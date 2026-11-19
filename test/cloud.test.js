@@ -42,3 +42,21 @@ test('the image is built from exactly what .dockerignore and the CodeBuild asset
   assert.match(dockerfile, /SIMULATOR_PUBLISH=off/, 'the cloud image never publishes');
   assert.match(dockerfile, /^USER node$/m);
 });
+
+test('the task is sized for the generator, deploys without a gap, and keeps the log files off EFS', async () => {
+  const stack = await readFile(new URL('../infra/lib/simulator-stack.mjs', import.meta.url), 'utf8');
+  assert.match(stack, /TASK_SIZE = Object\.freeze\(\{ cpu: 2048, memoryLimitMiB: 4096 \}\)/);
+  assert.match(stack, /\.\.\.TASK_SIZE,/);
+  // rolling: the new task is healthy before the old one goes; a browser stays on one of the two
+  assert.match(stack, /minHealthyPercent: 100,\s*maxHealthyPercent: 200,/);
+  assert.match(stack, /stickinessCookieDuration: /);
+  // the count is the service's own, so a deploy neither starts nor stops the simulator
+  assert.match(stack, /^\s*desiredCount,$/m);
+  const script = await readFile(new URL('../infra/scripts/cloud.mjs', import.meta.url), 'utf8');
+  assert.match(script, /desiredCount=\$\{desiredCount\}/);
+  assert.match(script, /desiredCount: wasRunning \? 1 : 0/);
+  assert.match(script, /is running on \$\{busy\.target\}: deploy when it has finished/);
+  const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8');
+  assert.match(dockerfile, /SIMULATOR_DATA_ROOT=\/data/);
+  assert.match(dockerfile, /SIMULATOR_SCRATCH_ROOT=\/tmp\/simulator/, 'out/ on the task disk, not on the EFS mount');
+});

@@ -510,10 +510,12 @@ test('targets: Staging has its own stack, salt, buckets and stage record; a miss
   assert.equal((await fetch(`${base}/api/state?target=qa`)).status, 400);
 });
 
-test('deployed in AWS: answers its CloudFront host, the health check and nothing else; never publishes; keeps the event stream alive', async () => {
+test('deployed in AWS: answers its CloudFront host, the health check and nothing else; never publishes; keeps the event stream alive; streams the generator\'s progress; keeps the log files off EFS', async () => {
   const { request } = await import('node:http');
   const cloudRoot = await mkdtemp(path.join(tmpdir(), 'll-sim-cloud-'));
-  const cloudPaths = { stateDir: path.join(cloudRoot, 'state'), dataDir: path.join(cloudRoot, 'seed'), outDir: path.join(cloudRoot, 'out') };
+  // as server.js builds them from SIMULATOR_DATA_ROOT (EFS) and SIMULATOR_SCRATCH_ROOT (the task's disk)
+  const scratch = path.join(cloudRoot, 'scratch');
+  const cloudPaths = { stateDir: path.join(cloudRoot, 'data/state'), dataDir: path.join(cloudRoot, 'data/seed'), outDir: path.join(scratch, 'out'), scratchDir: scratch };
   const cloudAws = fakeAws();
   const { noGitLayer } = await import('../src/simulator/layers.js');
   const publicHost = 'd1simulator.cloudfront.net';
@@ -561,6 +563,20 @@ test('deployed in AWS: answers its CloudFront host, the health check and nothing
     assert.ok(list.some((e) => e.type === 'step' && e.step === 'publish' && e.status === 'skipped'));
     assert.equal(list.at(-1).result.publish.reason, 'publish_off');
     assert.equal(writesIn(cloudAws.calls).length, 0);
+    // the generator's own progress, before the day-by-day replay
+    const progress = list.filter((e) => e.type === 'progress' && e.step === 'generate');
+    for (const phase of ['simulate', 'logs', 'stats', 'files']) assert.ok(progress.some((e) => e.phase === phase), phase);
+    const days = progress.filter((e) => e.phase === 'simulate');
+    assert.deepEqual([days[0].done, days.at(-1).done, days.at(-1).total], [1, 60, 60]);
+    const files = progress.filter((e) => e.phase === 'files').at(-1);
+    assert.equal(files.done, files.total);
+    assert.ok(list.findIndex((e) => e.type === 'progress' && e.step === 'generate') < list.findIndex((e) => e.type === 'generated'), 'the progress comes before the generator finishes');
+    assert.ok(progress.length < 200, `a bounded number of progress events (${progress.length})`);
+    // the log files on the scratch disk; the records and the seed folder on EFS
+    const generated = JSON.parse(await readFile(path.join(cloudPaths.stateDir, 'dry-run/generated.json'), 'utf8'));
+    assert.equal(generated.outDir, path.join(scratch, 'dry-run/out'));
+    assert.ok((await readdir(path.join(generated.outDir, 'app-logs'))).length > 0);
+    assert.ok(!(await readdir(path.join(cloudPaths.stateDir, 'dry-run'))).includes('out'), 'no log file under the records');
   } finally {
     srv.close();
     await rm(cloudRoot, { recursive: true, force: true });

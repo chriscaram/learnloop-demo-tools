@@ -19,12 +19,25 @@
 //    task sits in the default VPC's public subnets of the same two zones (a public IP for its
 //    outbound calls to S3, CloudFormation, Secrets Manager and ECR, so no NAT gateway) and
 //    accepts traffic from the load balancer only.
-//  - One task at most (minHealthyPercent 0, maxHealthyPercent 100): the server's "one action
-//    at a time" lock lives in its memory, so two tasks would be two locks over one state.
-//  - desiredCount 0: it runs only when started (scripts/cloud.mjs start). A deploy sets it
-//    back to 0; the deploy script starts it again when it was running.
-//  - state/, out/ and the seed folder live on EFS (/data), so a restart does not forget which
-//    stage is loaded on which target.
+//  - One task (desiredCount 0 or 1): the server's "one action at a time" lock lives in its
+//    memory, so two tasks would be two locks over one state. A deploy is nevertheless
+//    rolling (minHealthyPercent 100, maxHealthyPercent 200): the new task starts and turns
+//    healthy before the old one is drained, so the page keeps answering. For that minute
+//    both run; the load balancer's stickiness keeps a browser on one of them (an action's
+//    event stream is in the memory of the task that runs it), and the deploy script refuses
+//    to start while an action runs (scripts/cloud.mjs).
+//  - desiredCount comes from context `desiredCount`, which the deploy script sets to what
+//    the service has now (0 or 1), so a deploy never starts a stopped simulator nor stops a
+//    running one: it runs only when started (scripts/cloud.mjs start).
+//  - state/ (what is loaded on which target) and the seed folder live on EFS (/data), so a
+//    task replacement does not forget which stage is loaded. The generated log files (out/,
+//    ~8,700 small files per generation) live on the task's own disk (SIMULATOR_SCRATCH_ROOT,
+//    ../Dockerfile): written to EFS one after the other they took about 90 s of a 105 s
+//    stage-0 generation. They are only a cache of one generation; Load regenerates them.
+//  - 2 vCPU / 4 GB (TASK_SIZE): the generator is one thread; 2 vCPU leave the server's own
+//    thread and V8's garbage collector a core of their own, and 4 GB lift V8's heap limit
+//    (about half the container's memory) well above the ~0.9 GB a generation holds. At
+//    1 vCPU / 2 GB the same generation took ~35% longer on the same CPU; 4 vCPU add nothing.
 //  - The task role reads the two LearnLoop stacks' outputs and their pseudonym salts (not the
 //    JWT secrets), and reads/writes/deletes in exactly their three buckets each (context
 //    `learnloop`, read from the stack outputs by the deploy script). Nothing else.
@@ -54,16 +67,20 @@ export const PRIVATE_SUBNETS = Object.freeze([
   { availabilityZone: 'us-east-1a', cidrBlock: '172.31.96.0/24' },
   { availabilityZone: 'us-east-1b', cidrBlock: '172.31.97.0/24' },
 ]);
+/** The Fargate size: see the header (2 vCPU / 4 GB; was 1 vCPU / 2 GB). */
+export const TASK_SIZE = Object.freeze({ cpu: 2048, memoryLimitMiB: 4096 });
 export const ASSET_EXCLUDE = ['.git', 'node_modules', 'out', 'state', 'infra', 'test', 'docs'];
 
 export class SimulatorStack extends cdk.Stack {
   /**
    * props.authHash  hex SHA-256 of "Basic base64(user:password)"
    * props.learnloop [{ stack, buckets: [3 names], saltSecret }] one per deployed LearnLoop stack
+   * props.desiredCount 0 or 1: what the service has now (the deploy script reads it)
    */
   constructor(scope, id, props) {
     super(scope, id, props);
-    const { authHash, learnloop } = props;
+    const { authHash, learnloop, desiredCount = 0 } = props;
+    if (![0, 1].includes(desiredCount)) throw new Error('context desiredCount must be 0 or 1 (scripts/cloud.mjs deploy reads it from the service)');
     if (!Array.isArray(learnloop) || learnloop.length === 0) throw new Error('context learnloop must list at least one deployed LearnLoop stack (scripts/cloud.mjs deploy reads them)');
 
     // ------------------------------------------------------------------ image
@@ -159,8 +176,7 @@ export class SimulatorStack extends cdk.Stack {
     // ------------------------------------------------------------------ service
     const cluster = new ecs.Cluster(this, 'Cluster', { vpc, clusterName: 'telemetry-activity-simulator' });
     const taskDef = new ecs.FargateTaskDefinition(this, 'Task', {
-      cpu: 1024,
-      memoryLimitMiB: 2048,
+      ...TASK_SIZE,
       volumes: [{
         name: 'data',
         efsVolumeConfiguration: { fileSystemId: fs.fileSystemId, transitEncryption: 'ENABLED', authorizationConfig: { accessPointId: ap.accessPointId, iam: 'ENABLED' } },
@@ -197,9 +213,9 @@ export class SimulatorStack extends cdk.Stack {
       cluster,
       serviceName: 'telemetry-activity-simulator',
       taskDefinition: taskDef,
-      desiredCount: 0,
-      minHealthyPercent: 0,
-      maxHealthyPercent: 100,
+      desiredCount,
+      minHealthyPercent: 100,
+      maxHealthyPercent: 200,
       assignPublicIp: true,
       vpcSubnets: { subnets: publicSubnets },
       securityGroups: [taskSg],
@@ -212,6 +228,8 @@ export class SimulatorStack extends cdk.Stack {
       protocol: elbv2.ApplicationProtocol.HTTP,
       targets: [service],
       deregistrationDelay: cdk.Duration.seconds(10),
+      // during a rolling deploy both tasks answer for a minute: a browser stays on one
+      stickinessCookieDuration: cdk.Duration.hours(1),
       healthCheck: { path: '/healthz', healthyHttpCodes: '200', interval: cdk.Duration.seconds(15), healthyThresholdCount: 2 },
     });
 

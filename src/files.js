@@ -38,12 +38,17 @@ export async function writeData(data, dir = DATA_DIR) {
   }
 }
 
-export async function writeLogs({ appLogs, cloudfront }, dir = OUT_DIR) {
+/** onFile(done, total): progress, about every 500 files and at the end. */
+export async function writeLogs({ appLogs, cloudfront }, dir = OUT_DIR, { onFile = null } = {}) {
   await rm(path.join(dir, 'app-logs'), { recursive: true, force: true });
   await rm(path.join(dir, 'cloudfront'), { recursive: true, force: true });
-  for (const [key, body] of [...appLogs, ...cloudfront]) {
+  const files = [...appLogs, ...cloudfront];
+  let done = 0;
+  for (const [key, body] of files) {
     const file = path.join(dir, key);
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(file, body);
+    done += 1;
+    if (onFile && (done % 500 === 0 || done === files.length)) onFile(done, files.length);
   }
 }

@@ -2,6 +2,7 @@
 // from the repository root (scripts/cloud.mjs), which supplies the two context values:
 //   authHash   hex SHA-256 of the expected Basic Authorization header
 //   learnloop  JSON: [{ stack, buckets: [state, app logs, access logs], saltSecret }] per deployed LearnLoop stack
+//   desiredCount  0 or 1: the service's count now, so a deploy neither starts nor stops it
 import * as cdk from 'aws-cdk-lib';
 import { SimulatorStack } from '../lib/simulator-stack.mjs';
 
@@ -16,4 +17,5 @@ new SimulatorStack(app, 'TelemetryActivitySimulator', {
   description: 'Telemetry Activity Simulator for the demo presenter',
   authHash: app.node.tryGetContext('authHash'),
   learnloop,
+  desiredCount: Number(app.node.tryGetContext('desiredCount') ?? 0),
 });

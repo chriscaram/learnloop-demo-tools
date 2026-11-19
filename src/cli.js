@@ -9,10 +9,10 @@ import { PLACEHOLDER_DISTRIBUTION_DOMAIN, PLACEHOLDER_DISTRIBUTION_ID, generate,
 import { DATA_DIR, OUT_DIR, writeData, writeLogs } from './files.js';
 import { DEFAULT_SCENARIO, getScenario, stageOf } from './scenarios.js';
 
-export async function runSeed(options, { dataDir = DATA_DIR, outDir = OUT_DIR } = {}) {
-  const result = generate(options);
+export async function runSeed(options, { dataDir = DATA_DIR, outDir = OUT_DIR, onProgress = null } = {}) {
+  const result = generate({ ...options, onProgress });
   await writeData(result.data, dataDir);
-  await writeLogs(result, outDir);
+  await writeLogs(result, outDir, { onFile: onProgress && ((done, total) => onProgress({ phase: 'files', done, total })) });
   await mkdir(outDir, { recursive: true });
   await writeFile(path.join(outDir, 'manifest.json'), `${JSON.stringify({
     scenario: options.scenario ?? DEFAULT_SCENARIO,

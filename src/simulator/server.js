@@ -10,10 +10,12 @@
 // rebinding). It runs with the operator's own AWS credentials and git setup.
 //
 // Deployed in AWS (infra/, behind CloudFront and its password) the same server runs in
-// a container with four environment variables: SIMULATOR_BIND=0.0.0.0, SIMULATOR_PUBLIC_HOST
+// a container with five environment variables: SIMULATOR_BIND=0.0.0.0, SIMULATOR_PUBLIC_HOST
 // (the CloudFront domain: the one more Host, and https://<it> the one more Origin, it
-// accepts), SIMULATOR_PUBLISH=off (no target publishes) and SIMULATOR_DATA_ROOT (where
-// state/, out/ and the seed folder live, an EFS mount). GET /healthz answers before the
+// accepts), SIMULATOR_PUBLISH=off (no target publishes), SIMULATOR_DATA_ROOT (where
+// state/ and the seed folder live, an EFS mount) and SIMULATOR_SCRATCH_ROOT (where the
+// generated log files, out/, live: the task's own disk, because thousands of small writes
+// to EFS one after the other are what made a generation slow there). GET /healthz answers before the
 // Host check, for the load balancer, and says nothing else.
 //
 //   GET  /api/scenarios                       the cards: id, title, description (no expected finding, no parameters)
@@ -333,6 +335,9 @@ async function main() {
   const paths = root
     ? { stateDir: path.join(root, 'state'), dataDir: path.join(root, 'seed'), outDir: path.join(root, 'out') }
     : { stateDir: path.join(TOOLS_ROOT, 'state'), dataDir: DATA_DIR, outDir: OUT_DIR };
+  // the generated log files apart from the records (in AWS: the task's own disk, not EFS)
+  const scratch = env.SIMULATOR_SCRATCH_ROOT;
+  if (scratch) Object.assign(paths, { scratchDir: scratch, outDir: path.join(scratch, 'out') });
   const sim = createSimulator({
     aws: await createAwsLayer(),
     git: publishOff ? noGitLayer() : createGitLayer(LEARNLOOP_REPO),

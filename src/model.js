@@ -68,7 +68,7 @@ const iso = (ms) => new Date(ms).toISOString();
  * existed. Every parameter below that a scenario leaves null draws no random number,
  * so one scenario's choices never shift another's streams.
  */
-export function simulate({ anchor, seed, scenario = undefined }) {
+export function simulate({ anchor, seed, scenario = undefined, onDay = null }) {
   const def = typeof scenario === 'object' && scenario ? scenario : getScenario(scenario);
   const P = def.parameters;
   const pop = { learners: 420, cohortA: P.population.regular, cohortB: P.population.lapsing, cohortC: P.population.rarelyActive };
@@ -452,6 +452,8 @@ export function simulate({ anchor, seed, scenario = undefined }) {
   const extraLatency = (day) => Math.max(4, Math.round(xRng.lognormal(36 * (latencyNoise.get(`${day}:fast`) ?? 1), 0.3)));
 
   for (let day = -HISTORY_DAYS; day <= -1; day += 1) {
+    // progress only (the simulator page): it draws nothing, so the output is unchanged
+    onDay?.(day + HISTORY_DAYS + 1, HISTORY_DAYS);
     const start = dayStart(day);
     const dow = new Date(start).getUTCDay();
     const factor = WEEKDAY_FACTORS[dow];

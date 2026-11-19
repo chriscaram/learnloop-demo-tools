@@ -369,6 +369,7 @@ function handleEvent(e, source) {
       for (const [target, total] of Object.entries(e.totals)) setBucket(target, 0, total, e.destinations[target]);
       break;
     case 'progress':
+      if (e.step === 'generate') { showGenerating(e); break; }
       if (e.message) logLine(e.message);
       if (e.step === 'upload') setBucket(e.target, e.done, e.total);
       break;
@@ -384,6 +385,21 @@ function handleEvent(e, source) {
       break;
     default: break;
   }
+}
+
+/** While the generator runs (before the day-by-day replay): what it is doing, live. */
+const GENERATING = {
+  simulate: (e) => `Simulating the learners: day ${e.done} of ${e.total}.`,
+  logs: (e) => `Writing what the app logged: ${Math.round((100 * e.done) / Math.max(1, e.total))}% of ${fmt(e.total)} requests.`,
+  stats: () => 'Counting the days for the charts.',
+  files: (e) => `Saving the log files: ${fmt(e.done)} of ${fmt(e.total)}.`,
+};
+function showGenerating(e) {
+  const sentence = GENERATING[e.phase];
+  if (!sentence) return;
+  showMoment('generate');
+  $('#pace').hidden = false;
+  $('#pace').textContent = sentence(e);
 }
 
 // ------------------------------------------------------------------ 2. the chart, counters and feed

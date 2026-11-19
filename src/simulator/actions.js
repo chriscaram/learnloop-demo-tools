@@ -82,7 +82,14 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
   const targetDir = (dryRun, target = DEFAULT_TARGET) => path.join(paths.stateDir, ...(dryRun ? ['dry-run'] : []), ...(target === DEFAULT_TARGET ? [] : [target]));
   const stateFile = (dryRun, name, target = DEFAULT_TARGET) => path.join(targetDir(dryRun, target), name);
   const dataDirFor = (dryRun, target = DEFAULT_TARGET) => (!dryRun && target === DEFAULT_TARGET ? paths.dataDir : path.join(targetDir(dryRun, target), 'seed'));
-  const outDirFor = (dryRun, target = DEFAULT_TARGET) => (!dryRun && target === DEFAULT_TARGET ? paths.outDir : path.join(targetDir(dryRun, target), 'out'));
+  // The generated log files (out/) may live apart from the records (paths.scratchDir): in AWS
+  // on the task's own disk, because writing ~8,700 small files one by one to EFS took about
+  // 90 s of a 105 s generation. They are a cache of one generation, never the record of
+  // what is loaded; after a restart an upload asks for Generate again.
+  const scratchDir = (dryRun, target = DEFAULT_TARGET) => (paths.scratchDir
+    ? path.join(paths.scratchDir, ...(dryRun ? ['dry-run'] : []), ...(target === DEFAULT_TARGET ? [] : [target]))
+    : targetDir(dryRun, target));
+  const outDirFor = (dryRun, target = DEFAULT_TARGET) => (!dryRun && target === DEFAULT_TARGET ? paths.outDir : path.join(scratchDir(dryRun, target), 'out'));
   const layers = (dryRun) => ({ aws: dryRun ? readOnly(aws, 'aws') : aws, git: dryRun ? readOnly(git, 'git') : git });
   // publishOff (the simulator running in AWS): no target publishes, whatever TARGETS says
   const targetOfCtx = (ctx) => withPublish(targetOf(ctx.target ?? DEFAULT_TARGET), publishOff);
@@ -190,11 +197,19 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
   }
 
   // ------------------------------------------------------------------ generate
-  function runWorker(workerData) {
+  function runWorker(workerData, onProgress = () => {}) {
     return new Promise((resolve, reject) => {
       const worker = new Worker(workerUrl, { workerData });
       const timer = setTimeout(() => { worker.terminate(); reject(new ActionError(`generation did not finish within ${GENERATE_TIMEOUT_MS / 1000} s`)); }, GENERATE_TIMEOUT_MS);
-      worker.once('message', (msg) => { clearTimeout(timer); worker.terminate(); if (msg.ok) resolve(msg); else reject(new ActionError(msg.message)); });
+      const onMessage = (msg) => {
+        if (msg.progress) return onProgress(msg.progress);
+        worker.off('message', onMessage);
+        clearTimeout(timer);
+        worker.terminate();
+        if (msg.ok) resolve(msg); else reject(new ActionError(msg.message));
+        return undefined;
+      };
+      worker.on('message', onMessage);
       worker.once('error', (error) => { clearTimeout(timer); reject(new ActionError(error.message)); });
     });
   }
@@ -235,7 +250,7 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
     const out = await runWorker({
       options: { scenario: def.id, stage: st?.stage ?? null, anchor, salt, seed: SEED, distributionId: targets.distributionId, distributionDomain: targets.distributionDomain },
       dataDir, outDir, baseStage,
-    });
+    }, (p) => ctx.emit({ type: 'progress', step: 'generate', target: t.id, phase: p.phase, done: p.done, total: p.total }));
     const paceMs = Math.max(0, Math.min(MAX_PACE_MS, ctx.paceMs ?? DEFAULT_PACE_MS));
     const max = (key) => Math.max(0, ...out.stats.daily.map((d) => d[key] ?? 0));
     ctx.emit({
@@ -270,7 +285,9 @@ export function createActions({ aws, git, paths, scenarios = getScenario, now = 
     if (!ctx.dryRun) {
       const manifest = await readJson(path.join(generated.outDir, 'manifest.json'));
       if (!manifest || manifest.scenario !== generated.scenario || manifest.anchor !== generated.anchor || (manifest.stage ?? null) !== (generated.stage ?? null)) {
-        throw new ActionError('the generated files on disk do not match the last generation; run Generate again');
+        throw new ActionError(manifest
+          ? 'the generated files on disk do not match the last generation; run Generate again'
+          : 'the generated files are no longer on disk (the simulator was restarted since the last generation); run Generate again');
       }
       if (manifest.distributionId !== targets.distributionId) throw new ActionError(`the logs were generated for distribution ${manifest.distributionId}, the stack has ${targets.distributionId}; run Generate again`);
       const salt = await aws.secret(targets.saltSecret);

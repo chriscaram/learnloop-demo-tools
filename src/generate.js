@@ -22,13 +22,16 @@ export function todayUtc(now = new Date()) {
 export function generate({
   anchor = todayUtc(), salt, seed = 42, scenario = DEFAULT_SCENARIO, stage = null,
   distributionId = PLACEHOLDER_DISTRIBUTION_ID, distributionDomain = PLACEHOLDER_DISTRIBUTION_DOMAIN,
+  onProgress = null,
 } = {}) {
   if (!salt) throw new Error('--salt is required (use the value stored in /learnloop/prod/log-pseudonym-salt)');
   const def = typeof scenario === 'object' && scenario ? scenario : getScenario(scenario);
   const st = stageOf(def, stage);
-  const sim = simulate({ anchor, seed, scenario: def });
+  // onProgress({ phase, done, total }): the simulator page's progress; it changes no output
+  const sim = simulate({ anchor, seed, scenario: def, onDay: onProgress && ((done, total) => onProgress({ phase: 'simulate', done, total })) });
   const withhold = stageWithhold(sim, st);
-  const logs = emitLogs(sim, { salt, seed, distributionId, distributionDomain, withhold });
+  const logs = emitLogs(sim, { salt, seed, distributionId, distributionDomain, withhold, onProgress: onProgress && ((done, total) => onProgress({ phase: 'logs', done, total })) });
+  onProgress?.({ phase: 'stats', done: 0, total: null });
   const view = stageView(sim, st);
   return { sim, data: view.data, ...logs, stats: stageStats(view, logs, st), stage: st?.stage ?? null };
 }

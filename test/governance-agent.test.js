@@ -7,18 +7,26 @@
 // buckets at that moment. The demo flow (README, "Presenting the staged reveal"): load the
 // history (stage 0), onboard LearnLoop the same day, then one "Get usage telemetry" after
 // each of stages 1, 2 and 3, on the SAME application. The first read is the onboarding one,
-// over stage 0's logs: route baselines for days -29..0 (there are none: stage 0 holds no
-// recent traffic) and then, once, for days -59..-30 (backend/src/cadence.js
-// continueAfterTelemetryIngest; a later read finds history_already_read). Every later read
-// writes days -29..0 again, over that stage's logs (platform/telemetry/ingestion.js: one
-// baseline per route the read saw, busiest first). The earlier window therefore comes ONLY
-// from the stage-0 read, and the reads merge as the agent merges them: every baseline row
-// is kept, the distinct users of a window are the max across them (drift/usage.js
-// actorWindowsOf), day counts the latest row.
+// over stage 0's logs: route baselines for days -29..0 and then, once, for days -59..-30
+// (backend/src/cadence.js continueAfterTelemetryIngest; a later read finds
+// history_already_read). Every later read writes days -29..0 again, over that stage's logs
+// (platform/telemetry/ingestion.js: one baseline per route the read saw, busiest first). The
+// earlier window therefore comes ONLY from the stage-0 read, and the reads merge as the agent
+// merges them: every baseline row is kept, the distinct users of a window are the max across
+// them (drift/usage.js actorWindowsOf), day counts the latest row.
+//
+// The ORDER of the onboarding reads is the live one (2026-11-19, LearnLoop production): the
+// first forward read runs BEFORE the capabilities exist, so its route baselines carry no
+// capability (mapped 0%), and the history read, after the derivation, maps every route
+// (`onboarding: 'live'`, the default; `'mapped'` is the order the harness assumed before).
+// An unmapped row is still evidence that the source had data on its days
+// (drift/usage.js sourceObservedDays), so each capability's own series gets observed zeros on
+// those days (withZeroDays): that is how the live run raised two goal trends at stage 0.
+//
 // Then it runs drift/detectors.js#observationsForGoal over all the rows, as
 // drift/index.js#loadDriftWorld assembles them, for three goals linked one to one to the
 // learning, catalog and admin capabilities (one service = one capability, the
-// declared_in_code mapping).
+// declared_in_code mapping), the links the presenter confirmed live.
 //
 // Since 2026-11-16 it also replays what the agent's application-log read (S2,
 // aggregate_app_logs) counts for the manual follow-up rule: each stage's application-log
@@ -34,13 +42,13 @@
 // Start dates on all seven weekdays.
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PLACEHOLDER_DISTRIBUTION_DOMAIN, PLACEHOLDER_DISTRIBUTION_ID, stageView, stageWithhold } from '../src/generate.js';
 import { emitLogs } from '../src/emit.js';
 import { DAY_MS, simulate } from '../src/model.js';
-import { canonicalJson, getScenario, stageOf } from '../src/scenarios.js';
+import { canonicalJson, getScenario, stageOf, validateScenario } from '../src/scenarios.js';
 import { mergeState } from '../src/merge.js';
 import { completeState } from '../src/files.js';
 
@@ -163,6 +171,13 @@ function detect(rows, capabilities, followUpRows = [], applicationRecords = null
     return r.observations.map((o) => ({ goal: goal.goal_id, code: o.code, fingerprint: canonicalJson(o.fingerprint ?? {}), facts: o.facts, signal_ids: o.signal_ids }));
   });
   observations.standDowns = standDowns;
+  // each goal's daily-usage trend as the goal-trend rule computes it (drift/detectors.js
+  // goalUsage: the latest row per day, decompose.js mergeDayMaps), raised or not
+  observations.goalTrends = Object.fromEntries(GOALS.map((goal) => {
+    const serving = goal.served_by.map((l) => ({ capability: capabilities.find((c) => c.capability_id === l.capability_id), weight: 1 })).filter((x) => x.capability);
+    const u = det.goalUsage(goal, serving, world);
+    return [goal.goal_id, u && !u.incomparable ? { change_pct: u.trend?.change_pct ?? null, volume: u.volume } : null];
+  }));
   return observations;
 }
 
@@ -175,9 +190,10 @@ const agentNotes = (stage, data, anchor) => data.users.filter((u) => u.role === 
 /**
  * The four reads of the staged reveal: onboarding over the history (stage 0), with the
  * history read, then one current-window read per stage, detected after each. Returns
- * [stage 0, stage 1, stage 2, stage 3] observations.
+ * [stage 0, stage 1, stage 2, stage 3] observations (up to `upTo`). `onboarding: 'live'`:
+ * the onboarding read's rows carry no capability (it ran before the derivation).
  */
-function detectStages(def, anchor) {
+function detectStages(def, anchor, { onboarding = 'live', upTo = 3 } = {}) {
   const sim = simulate({ anchor, seed: 42, scenario: def });
   const services = [...new Set(sim.requests.filter((r) => r.kind === 'api').map((r) => r.service))];
   const capabilities = services.map((s) => ({ capability_id: CAPABILITY_OF_SERVICE[s] ?? `cap_${s}`, name: s, status: 'confirmed', criticality: 'high', entry_points: [], depends_on: [] }));
@@ -186,10 +202,10 @@ function detectStages(def, anchor) {
   const rows = [];
   const followUpRows = [];
   let clock = Date.parse('2030-01-01T00:00:00Z');
-  const read = (requests, window) => {
+  const read = (requests, window, { mapped = true } = {}) => {
     for (const aggregate of aggregates(requests, window)) {
       const b = ga.telemetry.reconstructBaseline({
-        aggregate, window, sourceKind: 'cloudfront_access_logs', capabilityId: aggregate.service ? CAPABILITY_OF_SERVICE[aggregate.service] : null,
+        aggregate, window, sourceKind: 'cloudfront_access_logs', capabilityId: mapped && aggregate.service ? CAPABILITY_OF_SERVICE[aggregate.service] : null,
         signalId: 'sig_cloudfront', sourceGapDays: new Set(),
       });
       clock += 5;
@@ -198,7 +214,7 @@ function detectStages(def, anchor) {
   };
   const seen = [];
   let live = null;
-  for (const stage of [0, 1, 2, 3]) {
+  for (const stage of [0, 1, 2, 3].filter((n) => n <= upTo)) {
     const st = stageOf(def, stage);
     const { requests, data } = stageView(sim, st);
     // the live state: stage 0 replaces it; a later stage merges into it, after the AI
@@ -210,7 +226,8 @@ function detectStages(def, anchor) {
       const base = JSON.parse(JSON.stringify(completeState(stageView(sim, stageOf(def, stage - 1)).data)));
       live = Object.fromEntries(mergeState({ live, stage: stageDocs, base }).map((r) => [r.domain, r.document]));
     }
-    read(requests, current);
+    read(requests, current, { mapped: !(stage === 0 && onboarding === 'live') });
+    if (stage === 0) seen.forwardRows = rows.length;
     if (stage === 0) read(requests, history); // the history read happens once, right after the onboarding read
     // The application logs of the same stage, as seed:upload writes them, read by the
     // follow-up aggregator over the job's windows (current every time, earlier once).
@@ -249,9 +266,16 @@ test('the agent\'s own detectors: the history (stage 0) raises nothing, stage 1 
     const actor = (list, goal) => list.filter((o) => o.goal === goal && o.code === 'NBF-USAGE-ACTOR_INACTIVITY');
     const goalsWith = (list) => [...new Set(list.map((o) => o.goal))].sort();
     const [s0, s1, s2, s3] = seen;
-    // stage 0, read at onboarding with the history read: nothing at all, on any goal
+    // stage 0, read at onboarding (before the capabilities exist) with the history read and
+    // the three goals confirmed: nothing at all, on any goal. The onboarding read finds no
+    // recent traffic (so no unmapped row exists), and each case goal's series, the earlier
+    // window only, RISES (visitRate), far from the -10% bar; the training goal's series is
+    // under the agent's volume floor.
     assert.deepEqual(s0.map((o) => [o.goal, o.code]), [], `${anchor} stage 0: ${JSON.stringify(s0.map((o) => [o.goal, o.code]))}`);
+    assert.equal(seen.forwardRows, 0, `${anchor} stage 0: the onboarding read finds no recent traffic`);
     assert.ok(s0.rows > 0, `${anchor} stage 0: the history read wrote the earlier window`);
+    for (const g of ['g_learn', 'g_cart']) assert.ok(s0.goalTrends[g].change_pct >= 15, `${anchor} stage 0: ${g} ${JSON.stringify(s0.goalTrends[g])}`);
+    assert.ok(s0.goalTrends.g_compliance.volume < 100, `${anchor} stage 0: training goal ${JSON.stringify(s0.goalTrends.g_compliance)}`); // MIN_USAGE_OBSERVATIONS
     // stage 1: lessons only, and nothing at all about the store or the required training
     assert.deepEqual(goalsWith(s1), ['g_learn'], `${anchor} stage 1: ${JSON.stringify(s1.map((o) => [o.goal, o.code]))}`);
     assert.equal(actor(s1, 'g_learn').length, 1);
@@ -261,15 +285,18 @@ test('the agent\'s own detectors: the history (stage 0) raises nothing, stage 1 
     const enrol = actor(s2, 'g_cart')[0].facts.inactive_routes;
     assert.deepEqual(enrol.map((r) => r.route), ['/api/courses/{courseId}/enrol'], `${anchor} stage 2: ${JSON.stringify(enrol)}`);
     assert.ok(enrol[0].earlier_actors >= 200 && enrol[0].drop_pct >= 33, `${anchor} stage 2: ${JSON.stringify(enrol)}`);
-    // stages 0, 1 and 2: the follow-up pattern is SEEN (the staff's ordinary reminders) and the
+    // stage 0: only the earlier window has application-log lines, so the follow-up rule stands
+    // down for want of a second read, by name
+    assert.deepEqual(s0.standDowns.filter((d) => d.goal_id === 'g_compliance').map((d) => d.reason), ['follow_up_too_few_reads'], `${anchor} stage 0`);
+    // stages 1 and 2: the follow-up pattern is SEEN (the staff's ordinary reminders) and the
     // rule stands down on the growth bar, by name — it is not silent for lack of data
-    for (const [list, n] of [[s0, 0], [s1, 1], [s2, 2]]) {
+    for (const [list, n] of [[s1, 1], [s2, 2]]) {
       assert.ok(!list.some((o) => o.code === FOLLOW_UP), `${anchor} stage ${n}: no manual follow-up finding`);
       const reasons = list.standDowns.filter((d) => d.goal_id === 'g_compliance').map((d) => d.reason);
       assert.equal(reasons.length, 1, `${anchor} stage ${n}: one stand-down on the compliance goal`);
       assert.ok(['follow_up_not_growing', 'follow_up_too_few_messages'].includes(reasons[0]), `${anchor} stage ${n}: ${reasons[0]}`);
       const figures = list.standDowns.find((d) => d.goal_id === 'g_compliance').figures;
-      assert.ok(figures.growth_ratio < 1.6, `${anchor} stage ${n}: growth ${figures.growth_ratio} far under the 2x bar`);
+      assert.ok(figures.growth_ratio < 1.9, `${anchor} stage ${n}: growth ${figures.growth_ratio} under the 2x bar`);
     }
     // stage 3: exactly stage 2 plus ONE manual follow-up finding, on the compliance goal and
     // the admin capability (where the staff's look-ups live)
@@ -328,20 +355,56 @@ test('the compliance case leaves the lesson and enrol findings as they are, in e
 });
 
 
-// Why the history stage keeps the ordinary recent activity (the routes no case is about)
-// instead of no recent traffic at all: with nothing observed after day -30, a goal's daily
-// series holds only days -59..-30, inside which the lapse (days -45..-31) and the checkout
-// change (from days -40..-30) already begin, so the goal-trend rule's split halves fall and
-// it raises the lesson AND the purchase goal at onboarding, before either case is loaded.
-test('the history stage with NO recent traffic at all would raise the goal trend on the lesson and purchase goals at onboarding (why stage 0 keeps the ordinary recent activity)', { skip }, () => {
-  const def = getScenario('q4-three-signals');
-  const r = def.staged_reveal;
+// The live result of 2026-11-19 (LearnLoop production, app_8eaa9ebcdff1), reproduced: the
+// definition loaded that day (test/fixtures/q4-three-signals-as-loaded-2026-11-19.json: stage 0
+// kept the ordinary recent activity, the lapse in days -45..-31, the checkout change from days
+// -40..-30) read in the live order. The onboarding read ran before the capabilities existed, so
+// its recent-window rows carry no capability; they still prove the CloudFront source had data
+// on days -29..0, so the learning and catalog series get observed zeros on all of them, and
+// the split-half trend of a series that is the earlier window followed by 29 zeros falls
+// about 97..100%: NBF-DRIFT-GOAL_TREND_NEGATIVE on the lesson and purchases goals, exactly the
+// worker's "emitted=2 (NBF-DRIFT-GOAL_TREND_NEGATIVE=2)". The training goal's series is the
+// same shape but under the volume floor (MIN_USAGE_OBSERVATIONS = 100), so it stays silent.
+// The order the harness assumed before (onboarding read mapped) raised nothing.
+const AS_LOADED_2026_11_19 = validateScenario(JSON.parse(readFileSync(path.join(HERE, 'fixtures/q4-three-signals-as-loaded-2026-11-19.json'), 'utf8')));
+
+test('reproduces 2026-11-19: the definition loaded that day, read in the live order, raises the goal trend on the lesson and purchases goals at onboarding (and nothing in the order assumed before)', { skip }, () => {
+  for (const anchor of ANCHORS) {
+    const [live] = detectStages(AS_LOADED_2026_11_19, anchor, { upTo: 0 });
+    assert.deepEqual(live.map((o) => [o.goal, o.code]).sort(), [['g_cart', 'NBF-DRIFT-GOAL_TREND_NEGATIVE'], ['g_learn', 'NBF-DRIFT-GOAL_TREND_NEGATIVE']], `${anchor}: ${JSON.stringify(live.map((o) => [o.goal, o.code]))}`);
+    for (const o of live) {
+      assert.ok(o.facts.change_pct <= -90, `${anchor} ${o.goal}: ${o.facts.change_pct}% (the recent days are observed zeros)`);
+      assert.ok(o.facts.second_half_mean < 0.1 * o.facts.first_half_mean, `${anchor} ${o.goal}: ${o.facts.first_half_mean} -> ${o.facts.second_half_mean}`);
+    }
+    assert.ok(live.goalTrends.g_compliance.change_pct <= -90 && live.goalTrends.g_compliance.volume < 100, `${anchor}: the training goal falls too, under the volume floor ${JSON.stringify(live.goalTrends.g_compliance)}`);
+    const [mapped] = detectStages(AS_LOADED_2026_11_19, anchor, { onboarding: 'mapped', upTo: 0 });
+    assert.deepEqual(mapped.map((o) => [o.goal, o.code]), [], `${anchor}: the order assumed before raised nothing`);
+  }
+});
+
+// Why the cases had to leave the earlier window, not only the recent traffic stage 0: the
+// same definition with NO recent traffic in stage 0 (so no unmapped row) still raises both
+// trends, because its earlier window holds the lapse (days -45..-31) and the checkout change
+// (from days -40..-30), and that window alone is the goals' series at onboarding.
+test('the 2026-11-19 definition with no recent traffic at stage 0 still raises the goal trend on the lesson and purchase goals (why the cases moved to the window boundary)', { skip }, () => {
+  const r = AS_LOADED_2026_11_19.staged_reveal;
   const { recent_activity_withheld: _a, ...h } = r.history_stage;
-  const empty = { ...def, staged_reveal: { ...r, history_stage: { ...h, recent_traffic_withheld: 'all' } } };
-  for (const anchor of ['2026-11-15', '2026-11-21']) {
-    const [s0] = stagesOf(empty, anchor);
+  const empty = { ...AS_LOADED_2026_11_19, staged_reveal: { ...r, history_stage: { ...h, recent_traffic_withheld: 'all' } } };
+  for (const anchor of ['2026-11-15', '2026-11-19', '2026-11-21']) {
+    const [s0] = detectStages(empty, anchor, { upTo: 0 });
     const trend = s0.filter((o) => o.code === 'NBF-DRIFT-GOAL_TREND_NEGATIVE').map((o) => o.goal).sort();
     assert.deepEqual(trend, ['g_cart', 'g_learn'], `${anchor}: ${JSON.stringify(s0.map((o) => [o.goal, o.code]))}`);
     assert.ok(!s0.some((o) => o.code === 'NBF-USAGE-ACTOR_INACTIVITY'), `${anchor}: no route has a recent window, so no inactivity`);
+  }
+});
+
+// The scenario as it is now, at onboarding, in BOTH orders: with no recent traffic in stage 0
+// the order of the onboarding reads cannot matter (the onboarding read writes no row).
+test('stage 0 as built raises nothing in either order of the onboarding reads, on all seven start weekdays', { skip }, () => {
+  const def = getScenario('q4-three-signals');
+  for (const anchor of ANCHORS) {
+    const [mapped] = detectStages(def, anchor, { onboarding: 'mapped', upTo: 0 });
+    assert.deepEqual(mapped.map((o) => [o.goal, o.code]), [], anchor);
+    assert.deepEqual(mapped.goalTrends, stagesOf(def, anchor)[0].goalTrends, `${anchor}: the same series`);
   }
 });

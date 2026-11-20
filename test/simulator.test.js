@@ -365,7 +365,7 @@ test('staged loads: the history first and it replaces the state; later stages me
   assert.ok(!list.some((e) => e.type === 'merge'));
   assert.equal(statePuts().length, 12, 'the history writes the whole starting state');
   assert.ok(statePuts().every(([, , , opts]) => !opts?.ifMatch), 'a replace is a plain write');
-  assert.equal(aws.calls.filter(([n, b]) => n === 'put' && b === 'stack-access-logs').length, 1440, 'one CloudFront object per hour (the recent ones without the case routes)');
+  assert.equal(aws.calls.filter(([n, b]) => n === 'put' && b === 'stack-access-logs').length, 744, 'one CloudFront object per hour of days -60..-30, none after (the history holds no recent traffic)');
   assert.ok(!git.calls.some(([n]) => ['add', 'commit', 'push'].includes(n)), 'the history does not publish');
   let rec = await loaded();
   assert.deepEqual([rec.scenario, rec.stage, rec.stages, rec.anchor, rec.state.mode], ['q4-three-signals', 0, 3, '2026-11-15', 'replaced']);

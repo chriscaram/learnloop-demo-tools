@@ -80,7 +80,15 @@ export function validateScenario(def) {
   validateSupport(id, p.support ?? null);
   validateCompliance(id, p.compliance ?? null);
   // carts, support and compliance are optional: a scenario written before they existed has none
-  const known = ['population', 'lapse', 'cancellations', 'slowdown', 'outage', 'carts', 'support', 'compliance'];
+  if (p.visitRate !== undefined && p.visitRate !== null) {
+    const v = p.visitRate;
+    const share = (x) => typeof x === 'number' && x > 0 && x <= 2;
+    if (!inWindow(v.fromDay) || !inWindow(v.toDay) || v.fromDay >= v.toDay || !share(v.fromShare) || !share(v.toShare)
+      || Object.keys(v).some((k) => !['fromDay', 'toDay', 'fromShare', 'toShare'].includes(k))) {
+      fail(id, 'visitRate needs fromDay < toDay inside -60..-1 and fromShare, toShare (0..2], or is null');
+    }
+  }
+  const known = ['population', 'lapse', 'cancellations', 'slowdown', 'outage', 'carts', 'support', 'compliance', 'visitRate'];
   const extra = Object.keys(p).filter((k) => !known.includes(k));
   if (extra.length) fail(id, `unknown parameters: ${extra.join(', ')} (the generator would silently ignore them)`);
   validateStagedReveal(id, def);

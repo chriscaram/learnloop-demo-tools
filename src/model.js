@@ -194,6 +194,14 @@ export function simulate({ anchor, seed, scenario = undefined, onDay = null }) {
   }
   learners[0].lastLessonDay = -33; // Ana's script, in every scenario
 
+  // visitRate (optional): the learners' own visits (lessons and browsing; not the staff's work
+  // nor the personas' scripts) at fromShare of their usual rate on fromDay, changing in a
+  // straight line to toShare on toDay, and at their usual rate on every other day. Absent or
+  // null: the usual rate every day (the same draws, so the output is unchanged).
+  const VR = P.visitRate ?? null;
+  const growthAt = (day) => (!VR || day < VR.fromDay || day > VR.toDay ? 1
+    : VR.fromShare + ((VR.toShare - VR.fromShare) * (day - VR.fromDay)) / (VR.toDay - VR.fromDay));
+
   // outage: who gives up on lessons after it (decided up front, from its own stream)
   const outage = P.outage;
   const inOutage = (day) => !!outage && day >= outage.fromDay && day <= outage.toDay;
@@ -457,6 +465,8 @@ export function simulate({ anchor, seed, scenario = undefined, onDay = null }) {
     const start = dayStart(day);
     const dow = new Date(start).getUTCDay();
     const factor = WEEKDAY_FACTORS[dow];
+    // visitRate (optional): the learners' own visits on this day, as a share of their usual rate
+    const learnerFactor = factor * growthAt(day);
     const weekend = dow === 0 || dow === 6;
 
     // renewals: the daily billing job at 00:10 UTC
@@ -499,7 +509,7 @@ export function simulate({ anchor, seed, scenario = undefined, onDay = null }) {
         continue;
       }
       if (u.group === 'cohortC') {
-        if (simRng.chance(u.browsePerDay * factor)) plans.push({ user: u, type: 'browse' });
+        if (simRng.chance(u.browsePerDay * learnerFactor)) plans.push({ user: u, type: 'browse' });
         continue;
       }
       if (u.group === 'cohortB' && day === u.lastLessonDay) {
@@ -507,15 +517,15 @@ export function simulate({ anchor, seed, scenario = undefined, onDay = null }) {
         continue;
       }
       if (u.group === 'cohortB' && day > u.lastLessonDay) {
-        if (simRng.chance(u.laterVisitsPerDay * factor)) plans.push({ user: u, type: 'browse' });
+        if (simRng.chance(u.laterVisitsPerDay * learnerFactor)) plans.push({ user: u, type: 'browse' });
         continue;
       }
       if (u.lostAfterOutage && day > outage.toDay) {
-        if (simRng.chance(u.laterVisitsPerDay * factor)) plans.push({ user: u, type: 'browse' });
+        if (simRng.chance(u.laterVisitsPerDay * learnerFactor)) plans.push({ user: u, type: 'browse' });
         continue;
       }
-      if (simRng.chance((u.lessonDaysPerWeek / 7) * factor)) plans.push({ user: u, type: 'lesson' });
-      else if (simRng.chance(u.browsePerDay * factor)) plans.push({ user: u, type: 'browse' });
+      if (simRng.chance((u.lessonDaysPerWeek / 7) * learnerFactor)) plans.push({ user: u, type: 'lesson' });
+      else if (simRng.chance(u.browsePerDay * learnerFactor)) plans.push({ user: u, type: 'browse' });
     }
     const messages = staffMessagesByDay.get(day) ?? 0;
     for (const s of staff) {

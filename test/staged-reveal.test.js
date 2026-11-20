@@ -30,11 +30,13 @@ const ANCHOR = '2026-11-15';
 const ARGS = { anchor: ANCHOR, salt: 'test-salt', seed: 42, scenario: ID };
 // The digest of q4-three-signals at these arguments: every state document, every
 // application log file and every CloudFront object. Updated deliberately when case 3
-// became compliance training (was 411cfab7…, the Help case, from commit d0b2a8c on): the
-// support parameters went back to the ordinary baseline, the Help give-up and its persona
-// were removed, and the compliance pass added organizations.json, training_assignments.json,
-// the employees' organisational fields, quiz retakes, the staff follow-up and reminders.
-const Q4_DIGEST = '3524753b3504d9d5b27cba90e179f768b1cc4c9c32575a7ae1d6f2bfec523968';
+// became compliance training (was 411cfab7…, the Help case, from commit d0b2a8c on), and
+// again on 2026-11-19 (was 3524753b…), when the live onboarding raised two goal trends at
+// stage 0: the lapse moved to days -31..-30 and the checkout change to days -29..-26 (both
+// at the window boundary, out of the earlier window), learners' visits rise through the
+// earlier window (visitRate 0.74 -> 1.33 over days -60..-30), nobody removes a course from
+// the cart (removeShare 0), and the second cancellation period starts on day -25.
+const Q4_DIGEST = '0c7f4b2a8ed03c509bcf84c4239bd28b64fc79597b2677d4f1ee7a7b75e5c356';
 const WEEK_OF_ANCHORS = ['2026-11-15', '2026-11-16', '2026-11-17', '2026-11-18', '2026-11-19', '2026-11-20', '2026-11-21'];
 const ENROL = '/api/courses/{courseId}/enrol';
 const HELP = '/api/me/support-requests';
@@ -65,33 +67,10 @@ test('stage 3 is q4-three-signals byte for byte (and so is no stage); stages 1 a
   assert.notEqual(digest(stages.get(1)), digest(stages.get(2)));
 });
 
-test('stage 0, the history: days -60..-30 byte for byte as in every later stage; from day -29 on only what no case is about (no lesson, checkout or surge line)', () => {
+test('stage 0, the history: days -60..-30 byte for byte as in every later stage, nothing at all from day -29 on (no line, no system event, no CloudFront object)', () => {
   const zero = stages.get(0);
-  const fromMs = zero.sim.anchorMs + def.staged_reveal.recent_window_from_day * DAY_MS;
   const st0 = stageOf(def, 0);
-  const st1 = stageOf(def, 1);
-  for (const route of st1.withheldRoutes) assert.ok(st0.withheldRoutes.has(route), `stage 0 withholds what stage 1 withholds: ${route}`);
-  for (const route of ['GET /api/lessons/{lessonId}', 'POST /api/lessons/{lessonId}/progress']) assert.ok(st0.withheldRoutes.has(route) && !st1.withheldRoutes.has(route), `case 1's ${route} comes with stage 1`);
-  const view = stageView(zero.sim, st0);
-  assert.equal(view.requests.filter((r) => r.ts >= fromMs && r.kind === 'api' && st0.withheldRoutes.has(`${r.method} ${r.route}`)).length, 0);
-  assert.equal(view.requests.filter((r) => r.ts < fromMs).length, zero.sim.requests.filter((r) => r.ts < fromMs).length, 'every request before day -29 is there');
-  for (const [svc, c] of Object.entries(zero.stats.capabilities)) assert.deepEqual(c.inactiveRoutes, [], `${svc}: nothing crosses the bars`);
-  const full = stages.get(3).stats.capabilities;
-  for (const route of ['/api/lessons/{lessonId}', '/api/courses/{courseId}/lessons', '/api/lessons/{lessonId}/progress', '/api/lessons/{lessonId}/quiz']) {
-    assert.deepEqual(zero.stats.capabilities.learning.routes[route], { ...full.learning.routes[route], recent: 0, dropPct: null }, `${route}: the final earlier window, no recent one`);
-  }
-  assert.deepEqual(zero.stats.capabilities.learning.routes['/api/me/progress'], full.learning.routes['/api/me/progress'], 'the busiest learning route reads as in the full scenario');
-  // the earlier window's follow-up is the final one (only "followed by a lesson within 7 days"
-  // can differ: a reminder late in the earlier window may be followed by a lesson in the recent one)
-  const { remindersFollowedByLessonIn7Days: _f0, ...k0 } = zero.stats.compliance.windows.earlier;
-  const { remindersFollowedByLessonIn7Days: _f3, ...k3 } = stages.get(3).stats.compliance.windows.earlier;
-  assert.deepEqual(k0, k3);
-});
-
-test('a history stage with "all": days -60..-30 byte for byte, nothing at all from day -29 on (no line, no system event, no CloudFront object)', () => {
-  const { recent_activity_withheld: _a, ...h } = def.staged_reveal.history_stage;
-  const empty = validateScenario({ ...def, staged_reveal: { ...def.staged_reveal, history_stage: { ...h, recent_traffic_withheld: 'all' } } });
-  const zero = generate({ ...ARGS, scenario: empty, stage: 0 });
+  assert.equal(st0.allRecentWithheld, true, 'the history stage leaves out every recent line');
   const fromMs = zero.sim.anchorMs + def.staged_reveal.recent_window_from_day * DAY_MS;
   const hourOf = (key) => Date.parse(`${key.match(/\.(\d{4}-\d{2}-\d{2})-(\d{2})\./).slice(1).join('T')}:00:00Z`);
   const r = stages.get(1);
@@ -102,16 +81,29 @@ test('a history stage with "all": days -60..-30 byte for byte, nothing at all fr
   assert.deepEqual([...zero.appLogs.keys()], earlierApp);
   for (const k of earlierApp) assert.equal(zero.appLogs.get(k), r.appLogs.get(k), k);
   assert.equal(zero.cloudfront.size, 31 * 24, 'one CloudFront object per hour of days -60..-30');
-  const view = stageView(zero.sim, stageOf(empty, 0));
+  const view = stageView(zero.sim, st0);
   assert.equal(view.requests.filter((q) => q.ts >= fromMs).length, 0);
   assert.equal(view.systemEvents.filter((e) => e.ts >= fromMs).length, 0);
-  assert.throws(() => validateScenario({ ...empty, staged_reveal: { ...empty.staged_reveal, history_stage: { ...empty.staged_reveal.history_stage, recent_activity_withheld: [FOLLOW_UP_SURGE] } } }), /no recent activity left to withhold/);
+  assert.equal(view.requests.filter((q) => q.ts < fromMs).length, zero.sim.requests.filter((q) => q.ts < fromMs).length, 'every request before day -29 is there');
+  for (const [svc, c] of Object.entries(zero.stats.capabilities)) assert.deepEqual(c.inactiveRoutes, [], `${svc}: nothing crosses the bars`);
+  const full = stages.get(3).stats.capabilities;
+  for (const route of ['/api/lessons/{lessonId}', '/api/me/progress']) {
+    assert.deepEqual(zero.stats.capabilities.learning.routes[route], { ...full.learning.routes[route], recent: 0, dropPct: null }, `${route}: the final earlier window, no recent one`);
+  }
+  // the earlier window's follow-up is the final one (only "opened" and "followed by a lesson
+  // within 7 days" can differ: a reminder late in the earlier window may be opened, or followed
+  // by a lesson, in the recent one, which stage 0 does not hold)
+  const { remindersFollowedByLessonIn7Days: _f0, remindersOpened: _o0, ...k0 } = zero.stats.compliance.windows.earlier;
+  const { remindersFollowedByLessonIn7Days: _f3, remindersOpened: _o3, ...k3 } = stages.get(3).stats.compliance.windows.earlier;
+  assert.deepEqual(k0, k3);
+  assert.ok(_o0 <= _o3 && _f0 <= _f3, 'stage 0 sees at most the opens and lessons the full scenario sees');
+  assert.throws(() => validateScenario({ ...def, staged_reveal: { ...def.staged_reveal, history_stage: { ...def.staged_reveal.history_stage, recent_activity_withheld: [FOLLOW_UP_SURGE] } } }), /no recent activity left to withhold/);
 });
 
 test('a stage only leaves lines out: same objects, every other line identical, the left-out lines are the withheld routes and activity from day -29 on', () => {
   const full = stages.get(3);
   const routeOf = new Map(full.sim.requests.filter((r) => r.kind === 'api').map((r) => [`${r.method} ${r.path}`, r.route]));
-  for (const stage of [0, 1, 2]) {
+  for (const stage of [1, 2]) { // stage 0 holds no recent object at all (the test above)
     const st = stageOf(def, stage);
     const fromMs = full.sim.anchorMs + st.fromDay * DAY_MS;
     const withhold = stageWithhold(full.sim, st);
@@ -185,12 +177,12 @@ test('revealed routes have the same distinct people per window in every stage; a
     const mine = cloudfrontActors(stages.get(stage));
     for (const [key, n] of full) {
       const [route, w] = key.split('|');
-      if (st.withheldRoutes.has(route) && w === 'recent') assert.equal(mine.get(key), undefined, `stage ${stage}: ${route} has no recent traffic`);
+      if ((st.allRecentWithheld || st.withheldRoutes.has(route)) && w === 'recent') assert.equal(mine.get(key), undefined, `stage ${stage}: ${route} has no recent traffic`);
       else if (activityRoutes.has(route) && w === 'recent') assert.ok((mine.get(key) ?? 0) <= n, `stage ${stage}: ${key}`);
       else assert.equal(mine.get(key), n, `stage ${stage}: ${key} as in the full scenario`);
     }
-    // the staff routes keep their recent window: the follow-up at its earlier level is there
-    for (const route of [`GET ${TRAINING_ROUTE}`, `POST ${MESSAGE}`, 'GET /api/admin/learners']) assert.equal(mine.get(`${route}|recent`), 1, `stage ${stage}: ${route} from the office`);
+    // stages 1 and 2: the staff routes keep their recent window, the follow-up at its earlier level
+    if (stage > 0) for (const route of [`GET ${TRAINING_ROUTE}`, `POST ${MESSAGE}`, 'GET /api/admin/learners']) assert.equal(mine.get(`${route}|recent`), 1, `stage ${stage}: ${route} from the office`);
     assert.deepEqual([...mine.keys()].filter((k) => !full.has(k)), [], `stage ${stage}: nothing the full scenario does not have`);
   }
   // each stage reveals more than the one before, and shows what the one before shows
@@ -291,7 +283,7 @@ test('the stage definitions: validated, sealed one fingerprint per stage, reveal
   const plain = plainStages(def);
   assert.equal(plain.length, 4);
   assert.deepEqual(plain.map((p) => p.stage), [0, 1, 2, 3]);
-  assert.match(plain[0].lines.join(' '), /before the application is onboarded.*these requests are left out of the logs: GET \/api\/lessons\/\{lessonId\}/);
+  assert.match(plain[0].lines.join(' '), /before the application is onboarded.*From 29 days before the start date on, nothing is in the logs/);
   assert.match(plain[1].lines.join(' '), /POST \/api\/courses\/\{courseId\}\/enrol/);
   assert.doesNotMatch(plain[1].lines.join(' '), /carts\.json\) are empty/, 'carts are not withheld any more');
   assert.match(plain[2].lines.join(' '), /follow-up of required training above its earlier level/);
@@ -314,10 +306,13 @@ test('the stage definitions: validated, sealed one fingerprint per stage, reveal
   assert.throws(() => validateScenario(withStages((s) => ({ ...s, recent_activity_withheld: ['help_give_up'] }))), /recent_activity_withheld lists/);
   // the history stage
   const withHistory = (h) => ({ ...def, staged_reveal: { ...r, history_stage: { ...r.history_stage, ...h } } });
-  assert.throws(() => validateScenario(withHistory({ recent_traffic_withheld: ['GET /api/me/cart'] })), /stage 1 withholds POST \/api\/courses\/\{courseId\}\/enrol, which the history stage showed/);
-  assert.throws(() => validateScenario(withHistory({ recent_traffic_withheld: r.stages[0].recent_traffic_withheld })), /stage 1 reveals no traffic/);
+  // a history stage that lists what it leaves out (q4-three-signals used one until 2026-11-19)
+  const listed = { recent_traffic_withheld: [...r.stages[0].recent_traffic_withheld, 'GET /api/lessons/{lessonId}'], recent_activity_withheld: [FOLLOW_UP_SURGE] };
+  validateScenario(withHistory(listed));
+  assert.throws(() => validateScenario(withHistory({ ...listed, recent_traffic_withheld: ['GET /api/me/cart'] })), /stage 1 withholds POST \/api\/courses\/\{courseId\}\/enrol, which the history stage showed/);
+  assert.throws(() => validateScenario(withHistory({ ...listed, recent_traffic_withheld: r.stages[0].recent_traffic_withheld })), /stage 1 reveals no traffic/);
   assert.throws(() => validateScenario(withHistory({ recent_traffic_withheld: 'some' })), /is "all" or lists/);
-  assert.throws(() => validateScenario(withHistory({ recent_activity_withheld: [] })), /stage 1 withholds training_follow_up_surge, which the history stage showed/);
+  assert.throws(() => validateScenario(withHistory({ ...listed, recent_activity_withheld: [] })), /stage 1 withholds training_follow_up_surge, which the history stage showed/);
   assert.throws(() => validateScenario(withHistory({ state_withheld: [] })), /stage 1 withholds training_follow_up_surge_notifications, which the history stage wrote/);
   assert.throws(() => validateScenario(withHistory({ extra: true })), /unknown staged_reveal.history_stage keys: extra/);
   const { history_stage: _h, ...noHistory } = r;
